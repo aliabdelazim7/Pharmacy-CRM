@@ -13,6 +13,7 @@ export default function Inventory() {
   const [showCatForm, setShowCatForm] = useState(false);
   const [showLowStock, setShowLowStock] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState('all');
   
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
@@ -67,7 +68,8 @@ export default function Inventory() {
     const matchesSearch = searchTerms.length === 0 || searchTerms.every(term => normalizedName.includes(term)) || (p.barcode && p.barcode.includes(searchQuery));
     const matchesStock = showLowStock ? p.stock_quantity < 5 : true;
     const matchesHidden = showHidden ? p.is_hidden === true : !p.is_hidden; // showHidden=true → المخفيين فقط
-    return matchesSearch && matchesStock && matchesHidden;
+    const matchesCategory = selectedCategory === 'all' || p.category_id === selectedCategory;
+    return matchesSearch && matchesStock && matchesHidden && matchesCategory;
   }).sort((a, b) => new Date((b as any).created_at || 0).getTime() - new Date((a as any).created_at || 0).getTime());
   const hiddenCount = products.filter(p => p.is_hidden).length;
   
@@ -471,6 +473,20 @@ export default function Inventory() {
               />
           </div>
           <div className="flex items-center gap-3">
+            <div className="relative">
+              <Tag className="absolute right-3 top-2.5 text-slate-400 pointer-events-none" size={18} />
+              <select
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
+                className="bg-white border border-slate-200 rounded-xl py-2.5 pr-10 pl-4 text-sm font-bold text-slate-600 focus:outline-none focus:ring-2 shadow-sm cursor-pointer"
+              >
+                <option value="all">كل التصنيفات</option>
+                {categories.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
             {hiddenCount > 0 && (
               <button
                 onClick={() => setShowHidden(!showHidden)}

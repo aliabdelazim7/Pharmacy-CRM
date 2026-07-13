@@ -120,32 +120,30 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPublicInvoiceRoute]);
 
-  if (isLoading && !isPublicInvoiceRoute) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center bg-slate-50 gap-4">
-        <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-        <p className="text-slate-500 font-bold text-lg">جاري تحميل البيانات...</p>
-      </div>
-    );
-  }
+  const overlay = isPublicInvoiceRoute ? null : isLoading ? (
+    <div className="h-screen flex flex-col items-center justify-center bg-slate-50 gap-4">
+      <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+      <p className="text-slate-500 font-bold text-lg">جاري تحميل البيانات...</p>
+    </div>
+  ) : dbError ? (
+    <div className="h-screen flex flex-col items-center justify-center bg-red-50 gap-4 p-8 text-center">
+      <div className="text-5xl">⚠️</div>
+      <h2 className="text-2xl font-black text-red-700">تعذّر الاتصال بقاعدة البيانات</h2>
+      <p className="text-red-500 font-mono text-sm bg-red-100 px-4 py-2 rounded-lg max-w-lg">{dbError}</p>
+      <button onClick={() => loadAll()} className="bg-red-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-red-700 transition">
+        إعادة المحاولة
+      </button>
+    </div>
+  ) : null;
 
-  if (dbError && !isPublicInvoiceRoute) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center bg-red-50 gap-4 p-8 text-center">
-        <div className="text-5xl">⚠️</div>
-        <h2 className="text-2xl font-black text-red-700">تعذّر الاتصال بقاعدة البيانات</h2>
-        <p className="text-red-500 font-mono text-sm bg-red-100 px-4 py-2 rounded-lg max-w-lg">{dbError}</p>
-        <button onClick={() => loadAll()} className="bg-red-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-red-700 transition">
-          إعادة المحاولة
-        </button>
-      </div>
-    );
-  }
-
+  // The Router must stay mounted even while loading: unmounting it tears down
+  // the history listener, so a navigate() issued right after loadAll() resolves
+  // (e.g. from the login screen) updates the URL but never re-renders the app.
   return (
     <>
       <ThemeInjector />
       <Router>
+        {overlay ?? (
         <Routes>
           <Route 
             path="/" 
@@ -187,6 +185,7 @@ function App() {
           </Route>
           <Route path="/view-invoice/:id" element={<PublicInvoice />} />
         </Routes>
+        )}
       </Router>
     </>
   );

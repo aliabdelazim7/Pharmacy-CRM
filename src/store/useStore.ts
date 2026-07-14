@@ -828,7 +828,7 @@ export const useStore = create<CashierStore>((set, get) => ({
   isSyncing: false,
   activeCashier: null,
   isAdminAuthenticated: !!sessionStorage.getItem('cashier_admin_auth'),
-  currentAdmin: null,
+  currentAdmin: (() => { try { const v = sessionStorage.getItem('current_admin'); return v ? JSON.parse(v) : null; } catch { return null; } })(),
   adminPermissions: (() => { try { const v = sessionStorage.getItem('admin_permissions'); return v ? JSON.parse(v) : null; } catch { return null; } })(),
   adminUsers: [],
   isPOSAuthenticated: !!sessionStorage.getItem('cashier_pos_auth'),
@@ -846,9 +846,11 @@ export const useStore = create<CashierStore>((set, get) => ({
     
     // Hardcoded fallback for the admin email
     if (adminEmail === 'alialawady2006@gmail.com' && pin === '123456') {
+      const admin = { email: 'alialawady2006@gmail.com' };
       sessionStorage.setItem('cashier_admin_auth', 'true');
       sessionStorage.removeItem('admin_permissions');
-      set({ isAdminAuthenticated: true, adminPermissions: null });
+      sessionStorage.setItem('current_admin', JSON.stringify(admin));
+      set({ isAdminAuthenticated: true, adminPermissions: null, currentAdmin: admin });
       await get().loadAll(true);
       return true;
     }
@@ -858,9 +860,11 @@ export const useStore = create<CashierStore>((set, get) => ({
     await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
     const { error } = await supabase.auth.signInWithPassword({ email: adminEmail, password: pin });
     if (error) return false;
+    const admin = { email: adminEmail };
     sessionStorage.setItem('cashier_admin_auth', 'true');
     sessionStorage.removeItem('admin_permissions'); // المدير العام = صلاحيات كاملة
-    set({ isAdminAuthenticated: true, adminPermissions: null });
+    sessionStorage.setItem('current_admin', JSON.stringify(admin));
+    set({ isAdminAuthenticated: true, adminPermissions: null, currentAdmin: admin });
     // Reload data now that we have an authenticated session (under RLS, the
     // initial anon load returns nothing).
     await get().loadAll(true);
@@ -876,9 +880,11 @@ export const useStore = create<CashierStore>((set, get) => ({
     const { error } = await supabase.auth.signInWithPassword({ email: user.email, password });
     if (error) return false;
     const perms = Array.isArray(user.permissions) ? user.permissions : [];
+    const admin = { email: user.email, permissions: perms };
     sessionStorage.setItem('cashier_admin_auth', 'true');
     sessionStorage.setItem('admin_permissions', JSON.stringify(perms));
-    set({ isAdminAuthenticated: true, adminPermissions: perms });
+    sessionStorage.setItem('current_admin', JSON.stringify(admin));
+    set({ isAdminAuthenticated: true, adminPermissions: perms, currentAdmin: admin });
     await get().loadAll(true);
     return true;
   },
@@ -916,7 +922,8 @@ export const useStore = create<CashierStore>((set, get) => ({
     await supabase.auth.signOut();
     sessionStorage.removeItem('cashier_admin_auth');
     sessionStorage.removeItem('admin_permissions');
-    set({ isAdminAuthenticated: false, adminPermissions: null });
+    sessionStorage.removeItem('current_admin');
+    set({ isAdminAuthenticated: false, adminPermissions: null, currentAdmin: null });
   },
 
   // Cashier login: each cashier is a Supabase Auth user (email set by the

@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+// Auto‑push test comment
 import { supabase } from '../lib/supabase';
 import { unitMinQty, unitStep } from '../utils/units';
 

@@ -771,11 +771,11 @@ const getSplits = (split: any, method: string, amount: number) => {
 // ─── Store ───────────────────────────────────────────────────
 export const useStore = create<CashierStore>((set, get) => ({
   storeSettings: {
-    name: 'ADRIA',
+    name: 'صيدلية المتكاملة',
     currency: 'ج.م',
-    logo: '',
+    logo: 'https://cdn-icons-png.flaticon.com/512/883/883360.png',
     taxRate: 0,
-    themeColor: '#4f46e5',
+    themeColor: '#10b981',
     address: '',
     phone: '',
     phone2: '',

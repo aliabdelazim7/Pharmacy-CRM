@@ -30,9 +30,12 @@ export default async function handler(req, res) {
       const items = Array.isArray(row.items) ? row.items : [];
       for (const item of items) {
         if (!item?.id) continue;
-        const { data: prod } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
+        const { data: prod } = await supabase.from('products').select('stock_quantity, strips_per_box').eq('id', item.id).single();
         const currentStock = Number(prod?.stock_quantity ?? 0);
-        await supabase.from('products').update({ stock_quantity: currentStock + Number(item.quantity || 0) }).eq('id', item.id);
+        // Stock is kept per box; strip lines convert strips→boxes on restore.
+        const spb = Number(prod?.strips_per_box ?? 1);
+        const qtyInBoxes = item.unit === 'شريط' && spb > 0 ? Number(item.quantity || 0) / spb : Number(item.quantity || 0);
+        await supabase.from('products').update({ stock_quantity: currentStock + qtyInBoxes }).eq('id', item.id);
       }
       restored += 1;
     }

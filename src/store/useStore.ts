@@ -1891,15 +1891,22 @@ export const useStore = create<CashierStore>((set, get) => ({
       }
 
       // Return the reserved stock so the upcoming checkout deducts it cleanly.
+      // Stock is kept per BOX, so strip lines must convert back strips→boxes —
+      // matching how the hold reserved them (otherwise stock inflates).
+      const heldQtyInBoxes = (it: any, prod: any) =>
+        it.unit === 'شريط' && prod?.strips_per_box && prod.strips_per_box > 0
+          ? it.quantity / prod.strips_per_box
+          : it.quantity;
       for (const item of held.items) {
+        const prod = state.products.find((p) => p.id === item.id);
         const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
         const currentStock = (prodData as any)?.stock_quantity ?? 0;
-        await supabase.from('products').update({ stock_quantity: currentStock + item.quantity }).eq('id', item.id);
+        await supabase.from('products').update({ stock_quantity: currentStock + heldQtyInBoxes(item, prod) }).eq('id', item.id);
       }
 
       const restoredProducts = state.products.map((p) => {
         const it = held.items.find((i) => i.id === p.id);
-        return it ? { ...p, stock_quantity: p.stock_quantity + it.quantity } : p;
+        return it ? { ...p, stock_quantity: p.stock_quantity + heldQtyInBoxes(it, p) } : p;
       });
 
       // Rebuild cart items from the held items + the latest product record.
@@ -1944,14 +1951,20 @@ export const useStore = create<CashierStore>((set, get) => ({
         alert('تعذّر إرجاع الفاتورة للمخزون: ' + error.message);
         return false;
       }
+      // Strip lines must convert strips→boxes when restoring (stock is per box).
+      const rHeldQtyInBoxes = (it: any, prod: any) =>
+        it.unit === 'شريط' && prod?.strips_per_box && prod.strips_per_box > 0
+          ? it.quantity / prod.strips_per_box
+          : it.quantity;
       for (const item of held.items) {
+        const prod = state.products.find((p) => p.id === item.id);
         const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
         const currentStock = (prodData as any)?.stock_quantity ?? 0;
-        await supabase.from('products').update({ stock_quantity: currentStock + item.quantity }).eq('id', item.id);
+        await supabase.from('products').update({ stock_quantity: currentStock + rHeldQtyInBoxes(item, prod) }).eq('id', item.id);
       }
       const restoredProducts = state.products.map((p) => {
         const it = held.items.find((i) => i.id === p.id);
-        return it ? { ...p, stock_quantity: p.stock_quantity + it.quantity } : p;
+        return it ? { ...p, stock_quantity: p.stock_quantity + rHeldQtyInBoxes(it, p) } : p;
       });
       set({
         heldInvoices: state.heldInvoices.filter((h) => h.id !== id),
@@ -1982,9 +1995,11 @@ export const useStore = create<CashierStore>((set, get) => ({
         if (delErr) { console.error('Sweep delete error:', delErr); continue; }
         const items = Array.isArray(row.items) ? row.items : [];
         for (const item of items) {
-          const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
+          const { data: prodData } = await supabase.from('products').select('stock_quantity, strips_per_box').eq('id', item.id).single();
           const currentStock = (prodData as any)?.stock_quantity ?? 0;
-          await supabase.from('products').update({ stock_quantity: currentStock + (item.quantity || 0) }).eq('id', item.id);
+          const spb = (prodData as any)?.strips_per_box ?? 1;
+          const qtyInBoxes = item.unit === 'شريط' && spb > 0 ? (item.quantity || 0) / spb : (item.quantity || 0);
+          await supabase.from('products').update({ stock_quantity: currentStock + qtyInBoxes }).eq('id', item.id);
         }
       }
 
@@ -1992,7 +2007,12 @@ export const useStore = create<CashierStore>((set, get) => ({
       const expiredItemQty = new Map<string, number>();
       for (const row of data as any[]) {
         const items = Array.isArray(row.items) ? row.items : [];
-        for (const it of items) expiredItemQty.set(it.id, (expiredItemQty.get(it.id) || 0) + (it.quantity || 0));
+        for (const it of items) {
+          const prod = get().products.find((p) => p.id === it.id);
+          const spb = prod?.strips_per_box ?? 1;
+          const qtyInBoxes = it.unit === 'شريط' && spb > 0 ? (it.quantity || 0) / spb : (it.quantity || 0);
+          expiredItemQty.set(it.id, (expiredItemQty.get(it.id) || 0) + qtyInBoxes);
+        }
       }
       set((s) => ({
         heldInvoices: s.heldInvoices.filter((h) => !expiredIds.has(h.id)),

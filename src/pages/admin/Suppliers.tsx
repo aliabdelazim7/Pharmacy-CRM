@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useStore } from '../../store/useStore';
 import type { PurchaseItem, Product } from '../../store/useStore';
-import { Users, Search, Plus, Edit2, Trash2, Phone, MapPin, Calendar, ShoppingCart, FileText, X, ChevronDown, Printer, Eye } from 'lucide-react';
+import { Users, Search, Plus, Edit2, Trash2, Phone, MapPin, Calendar, ShoppingCart, FileText, X, ChevronDown, Printer, Eye, ArrowUpRight, ArrowDownLeft } from 'lucide-react';
 import { normalizeArabic } from '../../utils/textUtils';
 import { UNIT_OPTIONS, getUnitConfig, isFractionalUnit, formatQty } from '../../utils/units';
 import { escapeHtml } from '../../utils/escapeHtml';
@@ -125,6 +125,7 @@ export default function Suppliers() {
   const [showSupplierModal, setShowSupplierModal] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<any>(null);
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
+  const [invoiceType, setInvoiceType] = useState<'purchase' | 'return'>('purchase');
   const [editingPurchaseInvoice, setEditingPurchaseInvoice] = useState<any>(null);
   const [selectedSupplierProfile, setSelectedSupplierProfile] = useState<any>(null);
   const [showSupplierProfile, setShowSupplierProfile] = useState(false);
@@ -191,38 +192,43 @@ export default function Suppliers() {
 
     try {
       setIsSaving(true);
+      const isReturn = invoiceType === 'return';
+      const multiplier = isReturn ? -1 : 1;
+
       const items: PurchaseItem[] = validItems.map(i => ({
         product_id: i.product_id,
-        quantity: parseFloat(i.quantity),
+        quantity: parseFloat(i.quantity) * multiplier,
         purchase_price: parseFloat(i.purchase_price),
       }));
 
       const splitPayments = {
-        cash: parseFloat(invPaidCash) || 0,
-        visa: parseFloat(invPaidVisa) || 0,
-        wallet: parseFloat(invPaidWallet) || 0,
-        instapay: parseFloat(invPaidInstapay) || 0
+        cash: (parseFloat(invPaidCash) || 0) * multiplier,
+        visa: (parseFloat(invPaidVisa) || 0) * multiplier,
+        wallet: (parseFloat(invPaidWallet) || 0) * multiplier,
+        instapay: (parseFloat(invPaidInstapay) || 0) * multiplier
       };
 
+      const finalTotal = invTotal * multiplier;
       const finalPaidAmount = splitPayments.cash + splitPayments.visa + splitPayments.wallet + splitPayments.instapay;
-      const change = Math.max(0, finalPaidAmount - invTotal);
-      const adjustedSplit = { ...splitPayments, cash: Math.max(0, splitPayments.cash - change) };
+      const change = isReturn ? 0 : Math.max(0, finalPaidAmount - invTotal);
+      const adjustedSplit = isReturn ? splitPayments : { ...splitPayments, cash: Math.max(0, splitPayments.cash - change) };
       const methods = [
-        { name: 'cash', amount: adjustedSplit.cash },
-        { name: 'visa', amount: adjustedSplit.visa },
-        { name: 'wallet', amount: adjustedSplit.wallet },
-        { name: 'instapay', amount: adjustedSplit.instapay }
+        { name: 'cash', amount: Math.abs(adjustedSplit.cash) },
+        { name: 'visa', amount: Math.abs(adjustedSplit.visa) },
+        { name: 'wallet', amount: Math.abs(adjustedSplit.wallet) },
+        { name: 'instapay', amount: Math.abs(adjustedSplit.instapay) }
       ];
       const primaryMethod = methods.sort((a, b) => b.amount - a.amount)[0].name;
-      const effectivePaidAmount = finalPaidAmount - change;
+      const effectivePaidAmount = isReturn ? finalPaidAmount : (finalPaidAmount - change);
 
       if (editingPurchaseInvoice) {
         await updatePurchaseInvoice(
           editingPurchaseInvoice.id,
           {
-            total: invTotal,
+            total: finalTotal,
             paid_amount: effectivePaidAmount,
             payment_method: primaryMethod as any,
+            type: invoiceType,
           } as any,
           items,
           adjustedSplit
@@ -233,15 +239,17 @@ export default function Suppliers() {
         await addPurchaseInvoice({
           invoice_number: invoiceNumber,
           supplier_id: invSupplierId,
-          total: invTotal,
+          total: finalTotal,
           paid_amount: effectivePaidAmount,
           payment_method: primaryMethod as any,
+          type: invoiceType,
         }, items, adjustedSplit);
         alert('تم حفظ الفاتورة بنجاح وتحديث المخزن');
       }
 
       setShowInvoiceModal(false);
       setEditingPurchaseInvoice(null);
+      setInvoiceType('purchase');
       setInvSupplierId('');
       setInvPaidCash('');
       setInvPaidVisa('');
@@ -494,6 +502,7 @@ export default function Suppliers() {
               setShowSupplierModal(true);
             } else {
               setEditingPurchaseInvoice(null);
+              setInvoiceType('purchase');
               setInvSupplierId('');
               setInvPaidCash('');
               setInvPaidVisa('');
@@ -636,7 +645,14 @@ export default function Suppliers() {
                         <FileText size={22} style={{ color: tc }} />
                       </div>
                       <div>
-                        <p className="font-black text-slate-800 text-lg">{inv.invoice_number}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="font-black text-slate-800 text-lg">{inv.invoice_number}</p>
+                          {inv.type === 'return' && (
+                            <span className="text-[10px] font-bold bg-red-50 text-red-600 px-2 py-0.5 rounded-full border border-red-100">
+                              مرتجع
+                            </span>
+                          )}
+                        </div>
                         <p className="text-slate-500 text-sm font-medium">{supplier?.name || 'مورد محذوف'}</p>
                         <p className="text-slate-400 text-xs mt-1">{new Date(inv.created_at).toLocaleDateString('ar-SA', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
                       </div>
@@ -650,12 +666,13 @@ export default function Suppliers() {
                       <button
                         onClick={() => {
                           setEditingPurchaseInvoice(inv);
+                          setInvoiceType(inv.type || 'purchase');
                           setInvSupplierId(inv.supplier_id);
-                          setInvPaidCash(inv.paid_cash ? inv.paid_cash.toString() : (inv.payment_method === 'cash' ? inv.paid_amount.toString() : ''));
-                          setInvPaidVisa(inv.paid_visa ? inv.paid_visa.toString() : (inv.payment_method === 'visa' ? inv.paid_amount.toString() : ''));
-                          setInvPaidWallet(inv.paid_wallet ? inv.paid_wallet.toString() : (inv.payment_method === 'wallet' ? inv.paid_amount.toString() : ''));
-                          setInvPaidInstapay(inv.paid_instapay ? inv.paid_instapay.toString() : (inv.payment_method === 'instapay' ? inv.paid_amount.toString() : ''));
-                          setInvItems((inv.items && inv.items.length > 0) ? inv.items.map((i: any) => ({ product_id: i.product_id, quantity: i.quantity.toString(), purchase_price: i.purchase_price.toString() })) : [{ product_id: '', quantity: '1', purchase_price: '' }]);
+                          setInvPaidCash(inv.paid_cash ? Math.abs(inv.paid_cash).toString() : (inv.payment_method === 'cash' ? Math.abs(inv.paid_amount).toString() : ''));
+                          setInvPaidVisa(inv.paid_visa ? Math.abs(inv.paid_visa).toString() : (inv.payment_method === 'visa' ? Math.abs(inv.paid_amount).toString() : ''));
+                          setInvPaidWallet(inv.paid_wallet ? Math.abs(inv.paid_wallet).toString() : (inv.payment_method === 'wallet' ? Math.abs(inv.paid_amount).toString() : ''));
+                          setInvPaidInstapay(inv.paid_instapay ? Math.abs(inv.paid_instapay).toString() : (inv.payment_method === 'instapay' ? Math.abs(inv.paid_amount).toString() : ''));
+                          setInvItems((inv.items && inv.items.length > 0) ? inv.items.map((i: any) => ({ product_id: i.product_id, quantity: Math.abs(i.quantity).toString(), purchase_price: i.purchase_price.toString() })) : [{ product_id: '', quantity: '1', purchase_price: '' }]);
                           setShowInvoiceModal(true);
                         }}
                         className="p-3 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-100 transition shadow-sm opacity-0 group-hover:opacity-100"
@@ -718,8 +735,39 @@ export default function Suppliers() {
               <button onClick={() => setShowInvoiceModal(false)} className="p-2 rounded-xl hover:bg-slate-200 transition"><X size={20} /></button>
             </div>
 
-            <form onSubmit={handleAddInvoice} className="flex flex-col flex-1 overflow-hidden">
+            <form onSubmit={handleAddInvoice} className="flex flex-col flex-1 overflow-hidden font-black">
               <div className="p-6 space-y-5 overflow-y-auto flex-1">
+                {/* Invoice Type Select */}
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">نوع الفاتورة</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setInvoiceType('purchase')}
+                      className={`py-3 px-4 rounded-xl font-bold border transition flex items-center justify-center gap-2 ${
+                        invoiceType === 'purchase'
+                          ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      <ArrowUpRight size={18} />
+                      فاتورة شراء (توريد)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInvoiceType('return')}
+                      className={`py-3 px-4 rounded-xl font-bold border transition flex items-center justify-center gap-2 ${
+                        invoiceType === 'return'
+                          ? 'bg-red-50 border-red-200 text-red-700'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      <ArrowDownLeft size={18} />
+                      مرتجع للمورد (خصم)
+                    </button>
+                  </div>
+                </div>
+
                 {/* Supplier Select */}
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-2">المورد <span className="text-red-500">*</span></label>

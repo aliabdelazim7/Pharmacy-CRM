@@ -58,6 +58,11 @@ export default function Inventory() {
     average_purchase_price: 0,
     sale_price: 0,
     stock_quantity: 0,
+    display_quantity: 0,
+    season: '',
+    has_strips: false,
+    strips_per_box: 1,
+    strip_sale_price: 0,
     category_id: categories[0]?.id || '',
     unit: 'قطعة'
   });
@@ -139,6 +144,11 @@ export default function Inventory() {
       average_purchase_price: product.average_purchase_price || product.purchase_price,
       sale_price: product.sale_price,
       stock_quantity: product.stock_quantity,
+      display_quantity: product.display_quantity || 0,
+      season: product.season || '',
+      has_strips: product.has_strips || false,
+      strips_per_box: product.strips_per_box || 1,
+      strip_sale_price: product.strip_sale_price || 0,
       category_id: product.category_id,
       unit: product.unit || 'قطعة'
     });
@@ -154,6 +164,11 @@ export default function Inventory() {
       average_purchase_price: 0,
       sale_price: 0,
       stock_quantity: 0,
+      display_quantity: 0,
+      season: '',
+      has_strips: false,
+      strips_per_box: 1,
+      strip_sale_price: 0,
       category_id: categories[0]?.id || '',
       unit: 'قطعة'
     });
@@ -188,6 +203,11 @@ export default function Inventory() {
       average_purchase_price: 0,
       sale_price: 0,
       stock_quantity: 0,
+      display_quantity: 0,
+      season: '',
+      has_strips: false,
+      strips_per_box: 1,
+      strip_sale_price: 0,
       category_id: categories[0]?.id || '',
       unit: 'قطعة'
     });
@@ -365,7 +385,14 @@ export default function Inventory() {
                 </div>
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">سعر البيع لكل {getUnitConfig(formData.unit).label} <span className="text-red-500">*</span></label>
-                  <input type="number" min="0" step="0.01" required value={formData.sale_price} onChange={e => setFormData({...formData, sale_price: parseFloat(e.target.value) || 0})} style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-green-500" />
+                  <input type="number" min="0" step="0.01" required value={formData.sale_price} onChange={e => {
+                    const val = parseFloat(e.target.value) || 0;
+                    setFormData(prev => ({
+                      ...prev,
+                      sale_price: val,
+                      strip_sale_price: prev.has_strips ? val / (prev.strips_per_box || 1) : prev.strip_sale_price
+                    }));
+                  }} style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-green-500" />
                 </div>
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">الكمية الحالية في المخزون</label>
@@ -393,6 +420,29 @@ export default function Inventory() {
                 <div className="sm:col-span-2">
                   <p className="text-xs text-slate-400 -mt-1">ℹ️ هذه كمية وتكلفة المخزون الافتتاحي — بعدها يتم التحديث تلقائياً عبر فواتير المشتريات. يمكن تعديل سعر البيع لاحقاً.</p>
                 </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">الكمية المعروضة في المحل</label>
+                  <div className="relative">
+                    <input
+                      type="number" min="0" max={formData.stock_quantity} step={isFractionalUnit(formData.unit) ? '0.001' : '1'}
+                      value={formData.display_quantity}
+                      onChange={e => setFormData({...formData, display_quantity: Math.min(parseFloat(e.target.value) || 0, formData.stock_quantity)})}
+                      style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
+                      className="w-full bg-slate-50 border border-slate-200 py-3 pl-16 pr-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-purple-500"
+                    />
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 pointer-events-none">{getUnitConfig(formData.unit).label}</span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">المتبقي في المستودع: <b>{Math.max(0, formData.stock_quantity - (formData.display_quantity || 0))}</b></p>
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">الموسم</label>
+                  <select value={formData.season} onChange={e => setFormData({...formData, season: e.target.value})} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:ring-indigo-500">
+                    <option value="">لا يوجد موسم</option>
+                    <option value="summer">صيفي</option>
+                    <option value="winter">شتوي</option>
+                    <option value="annual">سنوي</option>
+                  </select>
+                </div>
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-bold text-slate-700 mb-1">التصنيف</label>
                   <select value={formData.category_id} onChange={e => setFormData({...formData, category_id: e.target.value})} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:ring-indigo-500">
@@ -401,6 +451,54 @@ export default function Inventory() {
                     ))}
                   </select>
                 </div>
+                {formData.unit === 'علبة' && (
+                  <div className="sm:col-span-2 border-t pt-4 mt-2 space-y-4">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="has_strips"
+                        checked={formData.has_strips}
+                        onChange={e => setFormData(prev => ({ 
+                          ...prev, 
+                          has_strips: e.target.checked,
+                          strip_sale_price: e.target.checked ? prev.sale_price / (prev.strips_per_box || 1) : 0 
+                        }))}
+                        className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                      />
+                      <label htmlFor="has_strips" className="text-sm font-bold text-slate-700 select-none">يحتوي على شرائط (حبوب)</label>
+                    </div>
+
+                    {formData.has_strips && (
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-bold text-slate-700 mb-1">عدد الشرائط بالعلبة</label>
+                          <input
+                            type="number" min="1" step="1"
+                            value={formData.strips_per_box}
+                            onChange={e => {
+                              const val = parseInt(e.target.value) || 1;
+                              setFormData(prev => ({
+                                ...prev,
+                                strips_per_box: val,
+                                strip_sale_price: prev.sale_price / val
+                              }));
+                            }}
+                            className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-bold text-slate-700 mb-1">سعر بيع الشريط الواحد</label>
+                          <input
+                            type="number" min="0" step="0.01"
+                            value={formData.strip_sale_price}
+                            onChange={e => setFormData({...formData, strip_sale_price: parseFloat(e.target.value) || 0})}
+                            className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-amber-500"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="pt-4 mt-2 border-t">
                 <button type="submit" style={{ backgroundColor: storeSettings.themeColor }} className="w-full text-white py-4 rounded-xl font-bold transition shadow-lg shrink-0 flex items-center justify-center gap-2">

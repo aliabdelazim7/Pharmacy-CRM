@@ -22,6 +22,7 @@ import Financing from './pages/admin/Financing';
 import StockAlerts from './pages/admin/StockAlerts';
 import Coupons from './pages/admin/Coupons';
 import CarMaintenance from './pages/admin/CarMaintenance';
+import StockTake from './pages/admin/StockTake';
 import PublicInvoice from './pages/PublicInvoice';
 import { useStore } from './store/useStore';
 
@@ -179,6 +180,7 @@ function App() {
             <Route path="coupons" element={<Coupons />} />
             <Route path="employees" element={<Employees />} />
             <Route path="stock-alerts" element={<StockAlerts />} />
+            <Route path="stocktake" element={<StockTake />} />
             <Route path="budget" element={<Budget />} />
             <Route path="settings" element={<Settings />} />
             <Route path="car-maintenance" element={<CarMaintenance />} />

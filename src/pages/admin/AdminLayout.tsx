@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Package, Settings, LogOut, FileText, Users, BarChart3, Wallet, MessageCircle, CreditCard, Building2, BellRing, WifiOff, Ticket, PieChart, Car, Menu, X } from 'lucide-react';
+import { LayoutDashboard, Package, Settings, LogOut, FileText, Users, BarChart3, Wallet, MessageCircle, CreditCard, Building2, BellRing, WifiOff, Ticket, PieChart, Car, Menu, X, ClipboardCheck } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { useEffect, useState } from 'react';
 
@@ -49,6 +49,7 @@ export default function AdminLayout() {
     { name: 'نظرة عامة', path: '/admin/overview', icon: LayoutDashboard },
     { name: 'التحليلات والتقارير', path: '/admin/analytics', icon: BarChart3 },
     { name: 'المخزون والمنتجات', path: '/admin/inventory', icon: Package },
+    { name: 'الجرد والتسوية', path: '/admin/stocktake', icon: ClipboardCheck },
     { name: 'الفواتير والمرتجعات', path: '/admin/invoices', icon: FileText },
     { name: 'قاعدة العملاء', path: '/admin/customers', icon: Users },
     { name: 'حملات واتساب', path: '/admin/whatsapp-campaigns', icon: MessageCircle },

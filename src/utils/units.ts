@@ -22,6 +22,7 @@ export const UNIT_OPTIONS: UnitConfig[] = [
   { value: 'كرتونة', label: 'كرتونة', fractional: false },
   { value: 'شيكارة', label: 'شيكارة', fractional: false },
   { value: 'باكو', label: 'باكو', fractional: false },
+  { value: 'شريط', label: 'شريط', fractional: false },
 ];
 
 const DEFAULT_UNIT: UnitConfig = UNIT_OPTIONS[0];

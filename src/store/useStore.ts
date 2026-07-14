@@ -11,6 +11,9 @@ export interface Product {
   average_purchase_price: number;
   sale_price: number;
   stock_quantity: number;
+  has_strips?: boolean; // هل الدواء حبوب يباع بالعلبة/الشريط؟
+  strips_per_box?: number; // عدد الشرائط بالعلبة
+  strip_sale_price?: number; // سعر الشريط
   category_id: string;
   unit: string; // وحدة المنتج: قطعة / كيلو / جرام / لتر ... (المخزون والسعر بهذه الوحدة)
   is_hidden?: boolean; // إخفاء المنتج من الكاشير دون حذفه
@@ -77,6 +80,7 @@ export interface PurchaseInvoice {
   created_at: string;
   notes?: string;
   items?: PurchaseItem[];
+  type?: 'purchase' | 'return';
 }
 
 export interface Order {
@@ -303,13 +307,14 @@ interface CashierStore {
   loadAll: () => Promise<void>;
   loadSettingsOnly: () => Promise<void>;
   loadProductsOnly: () => Promise<void>;
+  adjustStock: (items: { product_id: string; counted_qty: number; location?: 'all' | 'display' | 'warehouse' }[], note?: string) => Promise<number>;
 
   // Cart
   addToCart: (product: Product) => void;
   addToCartQty: (product: Product, quantity: number) => void;
-  removeFromCart: (productId: string) => void;
-  updateQuantity: (productId: string, quantity: number) => void;
-  updatePrice: (productId: string, price: number) => void;
+  removeFromCart: (productId: string, unit: string) => void;
+  updateQuantity: (productId: string, quantity: number, unit: string) => void;
+  updatePrice: (productId: string, price: number, unit: string) => void;
   clearCart: () => void;
 
   // Operations
@@ -1007,6 +1012,7 @@ export const useStore = create<CashierStore>((set, get) => ({
           refunded_amount: item.refunded_amount || 0,
           sale_price: item.sale_price,
           purchase_price: item.average_purchase_price || item.purchase_price || 0,
+          unit: item.unit || 'قطعة',
         }));
         const { error: itemsError } = await supabase.from('order_items').insert(itemsPayload);
         if (itemsError) {
@@ -1015,10 +1021,14 @@ export const useStore = create<CashierStore>((set, get) => ({
         }
 
         for (const item of offlineOrder.items) {
-          const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
-          const currentStock = prodData?.stock_quantity ?? 0;
+          const { data: prodData } = await supabase.from('products').select('stock_quantity, has_strips, strips_per_box').eq('id', item.id).single();
+          const currentStock = (prodData as any)?.stock_quantity ?? 0;
           const netQty = item.quantity - (item.returned_quantity || 0);
-          await supabase.from('products').update({ stock_quantity: Math.max(0, currentStock - netQty) }).eq('id', item.id);
+          const stripsPerBox = (prodData as any)?.strips_per_box || 1;
+          const deductQty = ((prodData as any)?.has_strips && item.unit === 'شريط')
+            ? netQty / stripsPerBox
+            : netQty;
+          await supabase.from('products').update({ stock_quantity: Math.max(0, currentStock - deductQty) }).eq('id', item.id);
         }
 
         set((s) => ({
@@ -1044,45 +1054,57 @@ export const useStore = create<CashierStore>((set, get) => ({
   // ── Cart ───────────────────────────────────────────────────
   addToCart: (product) =>
     set((state) => {
-      if (product.stock_quantity <= 0) return state;
-      const step = unitStep(product.unit); // 1 للقطعة، 0.25 للوحدات الكسرية
-      const existing = state.cart.find((i) => i.id === product.id);
+      const stripsPerBox = product.strips_per_box || 1;
+      const maxQty = (product.has_strips && product.unit === 'شريط')
+        ? product.stock_quantity * stripsPerBox
+        : product.stock_quantity;
+      if (maxQty <= 0) return state;
+      const step = unitStep(product.unit);
+      const existing = state.cart.find((i) => i.id === product.id && i.unit === product.unit);
       if (existing) {
-        if (existing.quantity >= product.stock_quantity) return state;
-        const next = Math.min(existing.quantity + step, product.stock_quantity);
-        return { cart: state.cart.map((i) => (i.id === product.id ? { ...i, quantity: next } : i)) };
+        if (existing.quantity >= maxQty) return state;
+        const next = Math.min(existing.quantity + step, maxQty);
+        return { cart: state.cart.map((i) => (i.id === product.id && i.unit === product.unit ? { ...i, quantity: next } : i)) };
       }
-      const first = Math.min(step, product.stock_quantity);
+      const first = Math.min(step, maxQty);
       return { cart: [...state.cart, { ...product, quantity: first, returned_quantity: 0 }] };
     }),
 
   // إضافة منتج للسلة بكمية محددة (تُستخدم لإدخال الوزن من شاشة الكاشير)
   addToCartQty: (product, quantity) =>
     set((state) => {
-      if (product.stock_quantity <= 0 || quantity <= 0) return state;
+      const stripsPerBox = product.strips_per_box || 1;
+      const maxQty = (product.has_strips && product.unit === 'شريط')
+        ? product.stock_quantity * stripsPerBox
+        : product.stock_quantity;
+      if (maxQty <= 0 || quantity <= 0) return state;
       const min = unitMinQty(product.unit);
-      const existing = state.cart.find((i) => i.id === product.id);
+      const existing = state.cart.find((i) => i.id === product.id && i.unit === product.unit);
       if (existing) {
-        const next = Math.max(min, Math.min(existing.quantity + quantity, product.stock_quantity));
-        return { cart: state.cart.map((i) => (i.id === product.id ? { ...i, quantity: next } : i)) };
+        const next = Math.max(min, Math.min(existing.quantity + quantity, maxQty));
+        return { cart: state.cart.map((i) => (i.id === product.id && i.unit === product.unit ? { ...i, quantity: next } : i)) };
       }
-      const qty = Math.max(min, Math.min(quantity, product.stock_quantity));
+      const qty = Math.max(min, Math.min(quantity, maxQty));
       return { cart: [...state.cart, { ...product, quantity: qty, returned_quantity: 0 }] };
     }),
 
-  removeFromCart: (productId) => set((state) => ({ cart: state.cart.filter((i) => i.id !== productId) })),
+  removeFromCart: (productId, unit) => set((state) => ({ cart: state.cart.filter((i) => !(i.id === productId && i.unit === unit)) })),
 
-  updateQuantity: (productId: string, quantity: number) =>
+  updateQuantity: (productId: string, quantity: number, unit: string) =>
     set((state) => {
       const product = state.products.find((p) => p.id === productId);
       if (!product) return state;
-      const validQty = Math.max(unitMinQty(product.unit), Math.min(quantity, product.stock_quantity));
-      return { cart: state.cart.map((i) => (i.id === productId ? { ...i, quantity: validQty } : i)) };
+      const stripsPerBox = product.strips_per_box || 1;
+      const maxQty = (product.has_strips && unit === 'شريط')
+        ? product.stock_quantity * stripsPerBox
+        : product.stock_quantity;
+      const validQty = Math.max(unitMinQty(unit), Math.min(quantity, maxQty));
+      return { cart: state.cart.map((i) => (i.id === productId && i.unit === unit ? { ...i, quantity: validQty } : i)) };
     }),
 
-  updatePrice: (productId, price) =>
+  updatePrice: (productId, price, unit) =>
     set((state) => ({
-      cart: state.cart.map((i) => (i.id === productId ? { ...i, sale_price: price } : i))
+      cart: state.cart.map((i) => (i.id === productId && i.unit === unit ? { ...i, sale_price: price } : i))
     })),
 
   clearCart: () => set({ cart: [] }),
@@ -1285,6 +1307,7 @@ export const useStore = create<CashierStore>((set, get) => ({
         returned_quantity: 0,
         sale_price: item.sale_price,
         purchase_price: item.average_purchase_price || item.purchase_price,
+        unit: item.unit
       }));
       const { error: itemsError } = await supabase.from('order_items').insert(itemsPayload);
       if (itemsError) {
@@ -1293,7 +1316,13 @@ export const useStore = create<CashierStore>((set, get) => ({
 
       // Update stock
       for (const item of state.cart) {
-        const newQty = (state.products.find((p) => p.id === item.id)?.stock_quantity ?? 0) - item.quantity;
+        const product = state.products.find((p) => p.id === item.id);
+        const currentStock = product?.stock_quantity ?? 0;
+        const stripsPerBox = item.strips_per_box || 1;
+        const deductQty = (item.has_strips && item.unit === 'شريط')
+          ? item.quantity / stripsPerBox
+          : item.quantity;
+        const newQty = currentStock - deductQty;
         await supabase.from('products').update({ stock_quantity: Math.max(0, newQty) }).eq('id', item.id);
       }
 
@@ -1317,8 +1346,16 @@ export const useStore = create<CashierStore>((set, get) => ({
       };
 
       const updatedProducts = state.products.map((p) => {
-        const cartItem = state.cart.find((c) => c.id === p.id);
-        return cartItem ? { ...p, stock_quantity: Math.max(0, p.stock_quantity - cartItem.quantity) } : p;
+        const cartItemsForProd = state.cart.filter((c) => c.id === p.id);
+        if (cartItemsForProd.length === 0) return p;
+        const totalDeduct = cartItemsForProd.reduce((sum, item) => {
+          const stripsPerBox = item.strips_per_box || 1;
+          const deduct = (item.has_strips && item.unit === 'شريط')
+            ? item.quantity / stripsPerBox
+            : item.quantity;
+          return sum + deduct;
+        }, 0);
+        return { ...p, stock_quantity: Math.max(0, p.stock_quantity - totalDeduct) };
       });
 
       const updatedCustomers = finalCustomer && !state.customers.find((c) => c.id === finalCustomer!.id)
@@ -1458,9 +1495,17 @@ export const useStore = create<CashierStore>((set, get) => ({
         updatedItems = updatedItems.map((i) =>
           i.id === ret.productId ? { ...i, returned_quantity: i.returned_quantity + ret.returnQty, refunded_amount: (i.refunded_amount || 0) + ret.refundAmount } : i
         );
-        updatedProducts = updatedProducts.map((p) =>
-          p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + ret.returnQty } : p
-        );
+        updatedProducts = updatedProducts.map((p) => {
+          if (p.id === ret.productId) {
+            const item = order.items.find(x => x.id === ret.productId);
+            const stripsPerBox = p.strips_per_box || 1;
+            const restoreQty = (item?.unit === 'شريط' && p.has_strips)
+              ? ret.returnQty / stripsPerBox
+              : ret.returnQty;
+            return { ...p, stock_quantity: p.stock_quantity + restoreQty };
+          }
+          return p;
+        });
       }
 
       // Handle paid_amount adjustments based on cash refunded
@@ -1550,14 +1595,18 @@ export const useStore = create<CashierStore>((set, get) => ({
 
         const product = updatedProducts.find((p) => p.id === ret.productId);
         if (product) {
+          const stripsPerBox = product.strips_per_box || 1;
+          const restoreQty = (item.unit === 'شريط' && product.has_strips)
+            ? ret.returnQty / stripsPerBox
+            : ret.returnQty;
           const { error: prodError } = await supabase
             .from('products')
-            .update({ stock_quantity: product.stock_quantity + ret.returnQty })
+            .update({ stock_quantity: product.stock_quantity + restoreQty })
             .eq('id', ret.productId);
           if (prodError) throw prodError;
           
           updatedProducts = updatedProducts.map((p) =>
-            p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + ret.returnQty } : p
+            p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + restoreQty } : p
           );
         }
 
@@ -1639,10 +1688,17 @@ export const useStore = create<CashierStore>((set, get) => ({
     const isUUID = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str);
     const stockRestores = order.type === 'sale'
       ? order.items
-          .map((item) => ({
-            productId: item.id,
-            quantity: Math.max(0, (Number(item.quantity) || 0) - (Number(item.returned_quantity) || 0)),
-          }))
+          .map((item) => {
+            const netQty = Math.max(0, (Number(item.quantity) || 0) - (Number(item.returned_quantity) || 0));
+            const stripsPerBox = item.strips_per_box || 1;
+            const restoreQty = (item.has_strips && item.unit === 'شريط')
+              ? netQty / stripsPerBox
+              : netQty;
+            return {
+              productId: item.id,
+              quantity: restoreQty,
+            };
+          })
           .filter((item) => item.quantity > 0 && isUUID(item.productId))
       : [];
 
@@ -1758,12 +1814,20 @@ export const useStore = create<CashierStore>((set, get) => ({
       
       // Add back old quantities
       for (const item of order.items) {
-        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) + item.quantity);
+        const stripsPerBox = item.strips_per_box || 1;
+        const deduct = (item.has_strips && item.unit === 'شريط')
+          ? item.quantity / stripsPerBox
+          : item.quantity;
+        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) + deduct);
       }
       
       // Subtract new quantities
       for (const item of updatedItems) {
-        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) - item.quantity);
+        const stripsPerBox = item.strips_per_box || 1;
+        const deduct = (item.has_strips && item.unit === 'شريط')
+          ? item.quantity / stripsPerBox
+          : item.quantity;
+        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) - deduct);
       }
 
       const updatedProducts = [...state.products];
@@ -1837,6 +1901,7 @@ export const useStore = create<CashierStore>((set, get) => ({
         returned_quantity: item.returned_quantity || 0,
         sale_price: item.sale_price,
         purchase_price: item.average_purchase_price || item.purchase_price,
+        unit: item.unit
       }));
 
       const { error: itemsError } = await supabase
@@ -1907,7 +1972,7 @@ export const useStore = create<CashierStore>((set, get) => ({
         for (const returnItem of batchReturns) {
           const orderItemRow = await supabase
             .from('order_items')
-            .select('id, returned_quantity, refunded_amount')
+            .select('id, returned_quantity, refunded_amount, unit')
             .eq('order_id', batchOrderId)
             .eq('product_id', returnItem.productId)
             .single();
@@ -1929,16 +1994,22 @@ export const useStore = create<CashierStore>((set, get) => ({
 
           const { data: prodData, error: prodGetError } = await supabase
             .from('products')
-            .select('stock_quantity')
+            .select('stock_quantity, has_strips, strips_per_box')
             .eq('id', returnItem.productId)
             .single();
           
           if (prodGetError) throw prodGetError;
 
           const currentStock = prodData?.stock_quantity ?? 0;
+          const soldUnit = (orderItemRow.data as any)?.unit || 'قطعة';
+          const stripsPerBox = prodData?.strips_per_box || 1;
+          const restoreQty = (soldUnit === 'شريط' && prodData?.has_strips)
+            ? returnItem.returnQty / stripsPerBox
+            : returnItem.returnQty;
+
           const { error: prodError } = await supabase
             .from('products')
-            .update({ stock_quantity: currentStock + returnItem.returnQty })
+            .update({ stock_quantity: currentStock + restoreQty })
             .eq('id', returnItem.productId);
           
           if (prodError) throw prodError;
@@ -3680,5 +3751,42 @@ setupRealtime: () => {
     } catch (e) {
       console.error("Error updating cashier note:", e);
     }
+  },
+
+  // تسوية الجرد: تحديث مخزون المنتجات للكمية المجرودة وتسجيل الفروق.
+  adjustStock: async (items, note) => {
+    const state = get();
+    const rows: any[] = [];
+    const updatedProducts = [...state.products];
+    for (const it of items) {
+      const p = state.products.find((x) => x.id === it.product_id);
+      if (!p) continue;
+      const totalStock = Number(p.stock_quantity) || 0;
+      const display = Math.min(Number(p.display_quantity) || 0, totalStock);
+      const warehouse = Math.max(0, totalStock - display);
+      const location = it.location || 'all';
+      // الرصيد المُقارَن والتحديث حسب المخزن الذي يتم جرده.
+      const system = location === 'display' ? display : location === 'warehouse' ? warehouse : totalStock;
+      const counted = Number(it.counted_qty);
+      if (isNaN(counted) || Math.abs(counted - system) < 0.0001) continue; // تجاهل غير المتغيّر
+      const diff = counted - system;
+      const cost = Number(p.average_purchase_price ?? p.purchase_price) || 0;
+
+      let newStock: number, newDisplay: number;
+      if (location === 'display') { newDisplay = counted; newStock = warehouse + counted; }
+      else if (location === 'warehouse') { newStock = display + counted; newDisplay = display; }
+      else { newStock = counted; newDisplay = Math.min(display, counted); }
+
+      const patch: any = { stock_quantity: newStock, display_quantity: newDisplay };
+      const { error } = await supabase.from('products').update(patch).eq('id', it.product_id);
+      if (error) continue;
+      rows.push({ product_id: it.product_id, product_name: p.name, system_qty: system, counted_qty: counted, diff, cost, note: note || null });
+      const idx = updatedProducts.findIndex((x) => x.id === it.product_id);
+      if (idx >= 0) updatedProducts[idx] = { ...updatedProducts[idx], ...patch };
+    }
+    if (rows.length) await supabase.from('stock_adjustments').insert(rows);
+    set({ products: updatedProducts });
+    new BroadcastChannel('cashier-sync').postMessage('sync_products');
+    return rows.length;
   },
 }));

@@ -1,13 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
 import { useStore } from '../../store/useStore';
 import type { PurchaseItem, Product } from '../../store/useStore';
-import { Users, Search, Plus, Edit2, Trash2, Phone, MapPin, Calendar, ShoppingCart, FileText, X, ChevronDown, Printer, Eye, ArrowUpRight, ArrowDownLeft } from 'lucide-react';
+import { Users, Search, Plus, Edit2, Trash2, Phone, MapPin, Calendar, ShoppingCart, FileText, X, ChevronDown, Printer, Eye, Download } from 'lucide-react';
 import { normalizeArabic } from '../../utils/textUtils';
 import { UNIT_OPTIONS, getUnitConfig, isFractionalUnit, formatQty } from '../../utils/units';
 import { escapeHtml } from '../../utils/escapeHtml';
 import { openPrintWindow } from '../../utils/printWindow';
+import PaymentSplitInputs from '../../components/PaymentSplitInputs';
+import { activePaymentKeys, formToSplit, sumSplit, primaryMethod as primaryMethod_ } from '../../utils/paymentMethods';
 
-function ProductSearchSelect({ 
+function ProductSearchSelect({
   value, 
   onChange, 
   products
@@ -125,25 +127,22 @@ export default function Suppliers() {
   const [showSupplierModal, setShowSupplierModal] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<any>(null);
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
-  const [invoiceType, setInvoiceType] = useState<'purchase' | 'return'>('purchase');
   const [editingPurchaseInvoice, setEditingPurchaseInvoice] = useState<any>(null);
   const [selectedSupplierProfile, setSelectedSupplierProfile] = useState<any>(null);
   const [showSupplierProfile, setShowSupplierProfile] = useState(false);
+  const [supFrom, setSupFrom] = useState('');
+  const [supTo, setSupTo] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isPayingDebt, setIsPayingDebt] = useState(false);
-  const [debtPaidCash, setDebtPaidCash] = useState('');
-  const [debtPaidVisa, setDebtPaidVisa] = useState('');
-  const [debtPaidWallet, setDebtPaidWallet] = useState('');
-  const [debtPaidInstapay, setDebtPaidInstapay] = useState('');
+  const [debtPay, setDebtPay] = useState<Record<string, string>>({});
 
   const [formData, setFormData] = useState({ name: '', phone: '', address: '' });
 
   // Invoice form state
   const [invSupplierId, setInvSupplierId] = useState('');
-  const [invPaidCash, setInvPaidCash] = useState('');
-  const [invPaidVisa, setInvPaidVisa] = useState('');
-  const [invPaidWallet, setInvPaidWallet] = useState('');
-  const [invPaidInstapay, setInvPaidInstapay] = useState('');
+  const [invPay, setInvPay] = useState<Record<string, string>>({});
+  const invPayKeys = activePaymentKeys(storeSettings as any);
+  const invPaidTotal = invPayKeys.reduce((s, k) => s + (parseFloat(invPay[k] || '') || 0), 0);
   const [invItems, setInvItems] = useState<{ product_id: string; quantity: string; purchase_price: string }[]>([
     { product_id: '', quantity: '1', purchase_price: '' }
   ]);
@@ -192,46 +191,31 @@ export default function Suppliers() {
 
     try {
       setIsSaving(true);
-      const isReturn = invoiceType === 'return';
-      const multiplier = isReturn ? -1 : 1;
-
       const items: PurchaseItem[] = validItems.map(i => ({
         product_id: i.product_id,
-        quantity: parseFloat(i.quantity) * multiplier,
+        quantity: parseFloat(i.quantity),
         purchase_price: parseFloat(i.purchase_price),
       }));
 
-      const splitPayments = {
-        cash: (parseFloat(invPaidCash) || 0) * multiplier,
-        visa: (parseFloat(invPaidVisa) || 0) * multiplier,
-        wallet: (parseFloat(invPaidWallet) || 0) * multiplier,
-        instapay: (parseFloat(invPaidInstapay) || 0) * multiplier
-      };
+      const splitPayments: Record<string, number> = {};
+      invPayKeys.forEach((k) => { splitPayments[k] = parseFloat(invPay[k] || '') || 0; });
 
-      const finalTotal = invTotal * multiplier;
-      const finalPaidAmount = splitPayments.cash + splitPayments.visa + splitPayments.wallet + splitPayments.instapay;
-      const change = isReturn ? 0 : Math.max(0, finalPaidAmount - invTotal);
-      const adjustedSplit = isReturn ? splitPayments : { ...splitPayments, cash: Math.max(0, splitPayments.cash - change) };
-      const methods = [
-        { name: 'cash', amount: Math.abs(adjustedSplit.cash) },
-        { name: 'visa', amount: Math.abs(adjustedSplit.visa) },
-        { name: 'wallet', amount: Math.abs(adjustedSplit.wallet) },
-        { name: 'instapay', amount: Math.abs(adjustedSplit.instapay) }
-      ];
-      const primaryMethod = methods.sort((a, b) => b.amount - a.amount)[0].name;
-      const effectivePaidAmount = isReturn ? finalPaidAmount : (finalPaidAmount - change);
+      const finalPaidAmount = invPayKeys.reduce((s, k) => s + splitPayments[k], 0);
+      const change = Math.max(0, finalPaidAmount - invTotal);
+      const adjustedSplit: Record<string, number> = { ...splitPayments, cash: Math.max(0, (splitPayments.cash || 0) - change) };
+      const primaryMethod = primaryMethod_(adjustedSplit);
+      const effectivePaidAmount = finalPaidAmount - change;
 
       if (editingPurchaseInvoice) {
         await updatePurchaseInvoice(
           editingPurchaseInvoice.id,
           {
-            total: finalTotal,
+            total: invTotal,
             paid_amount: effectivePaidAmount,
             payment_method: primaryMethod as any,
-            type: invoiceType,
           } as any,
           items,
-          adjustedSplit
+          adjustedSplit as any
         );
         alert('تم تعديل الفاتورة بنجاح وتحديث المخزن');
       } else {
@@ -239,22 +223,17 @@ export default function Suppliers() {
         await addPurchaseInvoice({
           invoice_number: invoiceNumber,
           supplier_id: invSupplierId,
-          total: finalTotal,
+          total: invTotal,
           paid_amount: effectivePaidAmount,
           payment_method: primaryMethod as any,
-          type: invoiceType,
-        }, items, adjustedSplit);
+        }, items, adjustedSplit as any);
         alert('تم حفظ الفاتورة بنجاح وتحديث المخزن');
       }
 
       setShowInvoiceModal(false);
       setEditingPurchaseInvoice(null);
-      setInvoiceType('purchase');
       setInvSupplierId('');
-      setInvPaidCash('');
-      setInvPaidVisa('');
-      setInvPaidWallet('');
-      setInvPaidInstapay('');
+      setInvPay({});
       setInvItems([{ product_id: '', quantity: '1', purchase_price: '' }]);
       setActiveTab('invoices');
     } catch (error: any) {
@@ -344,11 +323,11 @@ export default function Suppliers() {
       const product = products.find(p => p.id === item.product_id);
       return `
         <tr>
-          <td style="padding:10px 4px;border-bottom:1px solid #eee;text-align:center;">${index + 1}</td>
-          <td style="padding:10px 4px;border-bottom:1px solid #eee;font-weight:bold;">${escapeHtml(product?.name || 'منتج غير معروف')}</td>
-          <td style="padding:10px 4px;border-bottom:1px solid #eee;text-align:center;">${item.quantity}</td>
-          <td style="padding:10px 4px;border-bottom:1px solid #eee;text-align:center;">${item.purchase_price.toFixed(2)}</td>
-          <td style="padding:10px 4px;border-bottom:1px solid #eee;text-align:left;font-weight:black;">${(item.purchase_price * item.quantity).toFixed(2)}</td>
+          <td style="text-align:center;">${index + 1}</td>
+          <td style="text-align:right;font-weight:bold;">${escapeHtml(product?.name || 'منتج غير معروف')}</td>
+          <td style="text-align:center;">${item.quantity}</td>
+          <td style="text-align:center;">${item.purchase_price.toFixed(2)}</td>
+          <td style="text-align:left;font-weight:bold;">${(item.purchase_price * item.quantity).toFixed(2)}</td>
         </tr>
       `;
     }).join('');
@@ -363,52 +342,47 @@ export default function Suppliers() {
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
   *{margin:0;padding:0;box-sizing:border-box;font-family:'Cairo', sans-serif;}
-  body{background:#fff;color:#1e293b;padding:0;margin:0;}
-  .invoice-container{width:148mm;min-height:210mm;margin:0 auto;padding:12mm;position:relative;display:flex;flex-direction:column;}
-  
-  .header-main{display:flex;justify-content:space-between;align-items:center;border-bottom:4px solid #1e293b;padding-bottom:15px;margin-bottom:20px;}
-  .store-identity{display:flex;align-items:center;gap:15px;}
-  .logo{width:70px;height:70px;object-fit:contain;border-radius:12px;}
-  .store-name{font-size:24px;font-weight:900;color:#1e293b;}
-  .store-details{font-size:11px;color:#64748b;margin-top:5px;line-height:1.5;}
-  
-  .invoice-title-badge{background:#1e293b;color:#fff;padding:6px 15px;border-radius:8px;font-weight:900;font-size:14px;white-space:nowrap;}
-  
-  .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:25px;background:#f8fafc;padding:15px;border-radius:12px;border:1px solid #e2e8f0;}
-  .info-item{font-size:13px;display:flex;gap:8px;}
-  .info-item strong{color:#64748b;white-space:nowrap;}
-  .info-item span{color:#1e293b;font-weight:700;}
-  
-  table{width:100%;border-collapse:collapse;margin-bottom:20px;}
-  thead th{background:#f1f5f9;color:#475569;font-size:13px;padding:12px 8px;text-align:center;border-bottom:2px solid #cbd5e1;}
+  body{background:#fff;color:#000;margin:0;}
+  .invoice-container{width:72mm;margin:0 auto;padding:2mm 1.5mm;display:flex;flex-direction:column;}
+
+  .header-main{text-align:center;border-bottom:1px dashed #000;padding-bottom:6px;margin-bottom:6px;}
+  .logo{max-height:55px;max-width:62mm;width:auto;object-fit:contain;display:block;margin:0 auto 4px;}
+  .store-name{font-size:17px;font-weight:900;color:#000;}
+  .store-details{font-size:9px;color:#333;margin-top:2px;line-height:1.4;}
+  .invoice-title-badge{display:inline-block;background:#000;color:#fff;padding:3px 12px;border-radius:6px;font-weight:900;font-size:11px;margin-top:5px;}
+
+  .info-grid{display:flex;flex-direction:column;gap:2px;margin:6px 0;font-size:10px;}
+  .info-item{display:flex;justify-content:space-between;gap:6px;}
+  .info-item strong{color:#444;white-space:nowrap;}
+  .info-item span{color:#000;font-weight:700;}
+
+  table{width:100%;border-collapse:collapse;margin-bottom:5px;}
+  thead th{font-size:9px;padding:4px 1px;text-align:center;border-bottom:1px solid #000;font-weight:900;}
   thead th:nth-child(2){text-align:right;}
   thead th:last-child{text-align:left;}
-  
-  .summary-section{margin-right:auto;width:65%;margin-top:auto;}
-  .summary-row{display:flex;justify-content:space-between;padding:8px 0;font-size:14px;border-bottom:1px solid #f1f5f9;}
-  .summary-row.total{border-top:2px solid #1e293b;border-bottom:none;margin-top:5px;font-size:18px;font-weight:900;}
-  
-  .footer-container{display:flex;justify-content:space-between;align-items:flex-end;margin-top:30px;padding-top:15px;border-top:1px dashed #cbd5e1;}
-  .footer-text{font-size:12px;color:#94a3b8;flex:1;text-align:center;}
-  .qr-code{width:80px;height:80px;border:1px solid #f1f5f9;padding:5px;border-radius:8px;}
+  tbody td{font-size:9px;padding:3px 1px;border-bottom:1px dotted #bbb;}
+
+  .summary-section{width:100%;margin-top:4px;}
+  .summary-row{display:flex;justify-content:space-between;padding:2px 0;font-size:10px;}
+  .summary-row.total{border-top:1px solid #000;border-bottom:1px solid #000;margin-top:3px;padding:4px 0;font-size:14px;font-weight:900;}
+
+  .footer-container{display:flex;flex-direction:column;align-items:center;gap:4px;margin-top:8px;padding-top:6px;border-top:1px dashed #000;}
+  .footer-text{font-size:9px;color:#333;text-align:center;}
+  .qr-code{width:80px;height:80px;}
 
   @media print{
-    @page{size:A5;margin:0;}
-    body{-webkit-print-color-adjust:exact;}
-    .invoice-container{width:148mm;height:210mm;padding:10mm;}
+    @page{size:72mm auto;margin:0;}
+    body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+    .invoice-container{width:72mm;padding:2mm 1.5mm;}
   }
 </style>
 </head>
 <body>
 <div class="invoice-container">
   <div class="header-main">
-    <div class="store-identity">
-      <img class="logo" src="${escapeHtml(storeSettings.logo)}" onerror="this.style.display='none'" />
-      <div>
-        <div class="store-name">${escapeHtml(storeSettings.name)}</div>
-        <div class="store-details">${escapeHtml(storeSettings.address)} | ${escapeHtml(storeSettings.phone)}</div>
-      </div>
-    </div>
+    <img class="logo" src="${escapeHtml(storeSettings.logo)}" onerror="this.style.display='none'" />
+    <div class="store-name">${escapeHtml(storeSettings.name)}</div>
+    <div class="store-details">${escapeHtml(storeSettings.address)} | ${escapeHtml(storeSettings.phone)}</div>
     <div class="invoice-title-badge">${isPaymentReceipt ? 'إيصال سداد مورد' : 'فاتورة مشتريات'}</div>
   </div>
 
@@ -502,12 +476,8 @@ export default function Suppliers() {
               setShowSupplierModal(true);
             } else {
               setEditingPurchaseInvoice(null);
-              setInvoiceType('purchase');
               setInvSupplierId('');
-              setInvPaidCash('');
-              setInvPaidVisa('');
-              setInvPaidWallet('');
-              setInvPaidInstapay('');
+              setInvPay({});
               setInvItems([{ product_id: '', quantity: '1', purchase_price: '' }]);
               setShowInvoiceModal(true);
             }
@@ -645,14 +615,7 @@ export default function Suppliers() {
                         <FileText size={22} style={{ color: tc }} />
                       </div>
                       <div>
-                        <div className="flex items-center gap-2">
-                          <p className="font-black text-slate-800 text-lg">{inv.invoice_number}</p>
-                          {inv.type === 'return' && (
-                            <span className="text-[10px] font-bold bg-red-50 text-red-600 px-2 py-0.5 rounded-full border border-red-100">
-                              مرتجع
-                            </span>
-                          )}
-                        </div>
+                        <p className="font-black text-slate-800 text-lg">{inv.invoice_number}</p>
                         <p className="text-slate-500 text-sm font-medium">{supplier?.name || 'مورد محذوف'}</p>
                         <p className="text-slate-400 text-xs mt-1">{new Date(inv.created_at).toLocaleDateString('ar-SA', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
                       </div>
@@ -666,13 +629,16 @@ export default function Suppliers() {
                       <button
                         onClick={() => {
                           setEditingPurchaseInvoice(inv);
-                          setInvoiceType(inv.type || 'purchase');
                           setInvSupplierId(inv.supplier_id);
-                          setInvPaidCash(inv.paid_cash ? Math.abs(inv.paid_cash).toString() : (inv.payment_method === 'cash' ? Math.abs(inv.paid_amount).toString() : ''));
-                          setInvPaidVisa(inv.paid_visa ? Math.abs(inv.paid_visa).toString() : (inv.payment_method === 'visa' ? Math.abs(inv.paid_amount).toString() : ''));
-                          setInvPaidWallet(inv.paid_wallet ? Math.abs(inv.paid_wallet).toString() : (inv.payment_method === 'wallet' ? Math.abs(inv.paid_amount).toString() : ''));
-                          setInvPaidInstapay(inv.paid_instapay ? Math.abs(inv.paid_instapay).toString() : (inv.payment_method === 'instapay' ? Math.abs(inv.paid_amount).toString() : ''));
-                          setInvItems((inv.items && inv.items.length > 0) ? inv.items.map((i: any) => ({ product_id: i.product_id, quantity: Math.abs(i.quantity).toString(), purchase_price: i.purchase_price.toString() })) : [{ product_id: '', quantity: '1', purchase_price: '' }]);
+                          {
+                            const pop: Record<string, string> = {};
+                            invPayKeys.forEach((k) => {
+                              const col = (inv as any)['paid_' + k];
+                              pop[k] = col ? col.toString() : (inv.payment_method === k ? inv.paid_amount.toString() : '');
+                            });
+                            setInvPay(pop);
+                          }
+                          setInvItems((inv.items && inv.items.length > 0) ? inv.items.map((i: any) => ({ product_id: i.product_id, quantity: i.quantity.toString(), purchase_price: i.purchase_price.toString() })) : [{ product_id: '', quantity: '1', purchase_price: '' }]);
                           setShowInvoiceModal(true);
                         }}
                         className="p-3 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-100 transition shadow-sm opacity-0 group-hover:opacity-100"
@@ -735,39 +701,8 @@ export default function Suppliers() {
               <button onClick={() => setShowInvoiceModal(false)} className="p-2 rounded-xl hover:bg-slate-200 transition"><X size={20} /></button>
             </div>
 
-            <form onSubmit={handleAddInvoice} className="flex flex-col flex-1 overflow-hidden font-black">
+            <form onSubmit={handleAddInvoice} className="flex flex-col flex-1 overflow-hidden">
               <div className="p-6 space-y-5 overflow-y-auto flex-1">
-                {/* Invoice Type Select */}
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">نوع الفاتورة</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setInvoiceType('purchase')}
-                      className={`py-3 px-4 rounded-xl font-bold border transition flex items-center justify-center gap-2 ${
-                        invoiceType === 'purchase'
-                          ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
-                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
-                      }`}
-                    >
-                      <ArrowUpRight size={18} />
-                      فاتورة شراء (توريد)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setInvoiceType('return')}
-                      className={`py-3 px-4 rounded-xl font-bold border transition flex items-center justify-center gap-2 ${
-                        invoiceType === 'return'
-                          ? 'bg-red-50 border-red-200 text-red-700'
-                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
-                      }`}
-                    >
-                      <ArrowDownLeft size={18} />
-                      مرتجع للمورد (خصم)
-                    </button>
-                  </div>
-                </div>
-
                 {/* Supplier Select */}
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-2">المورد <span className="text-red-500">*</span></label>
@@ -825,24 +760,12 @@ export default function Suppliers() {
                 </div>
 
                 {/* Paid Amount */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wide text-right">كاش</label>
-                    <input type="number" dir="ltr" placeholder="0.00" value={invPaidCash} onChange={e => setInvPaidCash(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition font-bold text-right" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wide text-right">فيزا</label>
-                    <input type="number" dir="ltr" placeholder="0.00" value={invPaidVisa} onChange={e => setInvPaidVisa(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition font-bold text-right" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wide text-right">محفظة</label>
-                    <input type="number" dir="ltr" placeholder="0.00" value={invPaidWallet} onChange={e => setInvPaidWallet(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition font-bold text-right" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wide text-right">انستا باي</label>
-                    <input type="number" dir="ltr" placeholder="0.00" value={invPaidInstapay} onChange={e => setInvPaidInstapay(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition font-bold text-right" />
-                  </div>
-                </div>
+                <PaymentSplitInputs
+                  value={invPay}
+                  onChange={(k, v) => setInvPay((s) => ({ ...s, [k]: v }))}
+                  labelClassName="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wide text-right"
+                  inputClassName="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition font-bold text-right"
+                />
 
                 {/* Summary */}
                 <div className="rounded-2xl p-5 border shadow-inner" style={{ backgroundColor: tc + '08', borderColor: tc + '20' }}>
@@ -854,20 +777,20 @@ export default function Suppliers() {
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm text-slate-500 font-bold">
                       <span>إجمالي المدفوع</span>
-                      <span className="text-slate-800">{(parseFloat(invPaidCash || '0') + parseFloat(invPaidVisa || '0') + parseFloat(invPaidWallet || '0') + parseFloat(invPaidInstapay || '0')).toLocaleString()}</span>
+                      <span className="text-slate-800">{invPaidTotal.toLocaleString()}</span>
                     </div>
 
                     <div className="flex justify-between text-sm font-bold">
                       <span className="text-slate-500">متبقي للمورد (آجل)</span>
-                      <span className={invTotal - (parseFloat(invPaidCash || '0') + parseFloat(invPaidVisa || '0') + parseFloat(invPaidWallet || '0') + parseFloat(invPaidInstapay || '0')) > 0 ? 'text-red-500' : 'text-slate-400'}>
-                        {Math.max(0, invTotal - (parseFloat(invPaidCash || '0') + parseFloat(invPaidVisa || '0') + parseFloat(invPaidWallet || '0') + parseFloat(invPaidInstapay || '0'))).toLocaleString()}
+                      <span className={invTotal - invPaidTotal > 0 ? 'text-red-500' : 'text-slate-400'}>
+                        {Math.max(0, invTotal - invPaidTotal).toLocaleString()}
                       </span>
                     </div>
 
                     <div className="flex justify-between text-sm font-bold">
                       <span className="text-slate-500">الباقي (مسترد)</span>
-                      <span className={(parseFloat(invPaidCash || '0') + parseFloat(invPaidVisa || '0') + parseFloat(invPaidWallet || '0') + parseFloat(invPaidInstapay || '0')) - invTotal > 0 ? 'text-emerald-600' : 'text-slate-400'}>
-                        {Math.max(0, (parseFloat(invPaidCash || '0') + parseFloat(invPaidVisa || '0') + parseFloat(invPaidWallet || '0') + parseFloat(invPaidInstapay || '0')) - invTotal).toLocaleString()}
+                      <span className={invPaidTotal - invTotal > 0 ? 'text-emerald-600' : 'text-slate-400'}>
+                        {Math.max(0, invPaidTotal - invTotal).toLocaleString()}
                       </span>
                     </div>
                   </div>
@@ -887,7 +810,10 @@ export default function Suppliers() {
 
       {/* ── Supplier Profile Modal ── */}
       {showSupplierProfile && selectedSupplierProfile && (() => {
-        const supplierInvoices = purchaseInvoices.filter(inv => inv.supplier_id === selectedSupplierProfile.id);
+        const _start = supFrom ? new Date(`${supFrom}T00:00:00`) : null;
+        const _end = supTo ? (() => { const d = new Date(`${supTo}T00:00:00`); d.setDate(d.getDate() + 1); return d; })() : null;
+        const inRange = (dt: any) => { const d = new Date(dt); return (!_start || d >= _start) && (!_end || d < _end); };
+        const supplierInvoices = purchaseInvoices.filter(inv => inv.supplier_id === selectedSupplierProfile.id && inRange(inv.created_at));
         const totalPurchases = supplierInvoices.reduce((sum, inv) => sum + inv.total, 0);
         const totalPaid = supplierInvoices.reduce((sum, inv) => sum + inv.paid_amount, 0);
         const totalDebt = totalPurchases - totalPaid;
@@ -930,25 +856,17 @@ export default function Suppliers() {
         })();
 
         const handlePayDebt = async () => {
-          const splitPayments = {
-            cash: parseFloat(debtPaidCash) || 0,
-            visa: parseFloat(debtPaidVisa) || 0,
-            wallet: parseFloat(debtPaidWallet) || 0,
-            instapay: parseFloat(debtPaidInstapay) || 0
-          };
-          const totalPaid = splitPayments.cash + splitPayments.visa + splitPayments.wallet + splitPayments.instapay;
+          const splitPayments = formToSplit(debtPay);
+          const totalPaid = sumSplit(splitPayments);
 
           if (totalPaid <= 0) return alert('أدخل مبلغاً صحيحاً للسداد');
           if (totalPaid > totalDebt + 0.01) return alert('المبلغ المدخل أكبر من المديونية الحالية');
-          
+
           try {
             setIsPayingDebt(true);
-            await useStore.getState().paySupplierDebt(selectedSupplierProfile.id, totalPaid, splitPayments);
+            await useStore.getState().paySupplierDebt(selectedSupplierProfile.id, totalPaid, splitPayments as any);
             alert('تم تسجيل عملية السداد بنجاح');
-            setDebtPaidCash('');
-            setDebtPaidVisa('');
-            setDebtPaidWallet('');
-            setDebtPaidInstapay('');
+            setDebtPay({});
           } catch (e) {
             alert('حدث خطأ أثناء تسجيل السداد');
           } finally {
@@ -956,10 +874,42 @@ export default function Suppliers() {
           }
         };
 
+        const exportSupplierPDF = () => {
+          const cur = storeSettings.currency;
+          const period = (supFrom || supTo) ? `الفترة: ${supFrom || '...'} ← ${supTo || '...'}` : 'كل الفترات';
+          const prodRows = productStats.map((s: any) => `<tr><td>${escapeHtml(s.name)}</td><td>${formatQty(s.totalQty, s.unit)}</td><td>${s.avgPrice.toFixed(2)}</td><td>${s.lastPrice.toFixed(2)}</td><td>${formatQty(s.currentStock, s.unit)}</td><td>${formatQty(s.sold, s.unit)}</td></tr>`).join('');
+          const invRows = [...supplierInvoices].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).map((inv) => `<tr><td>${escapeHtml(String(inv.invoice_number))}</td><td>${new Date(inv.created_at).toLocaleString('ar-EG')}</td><td>${(inv.total || 0).toFixed(2)}</td><td>${(inv.paid_amount || 0).toFixed(2)}</td><td>${((inv.total || 0) - (inv.paid_amount || 0)).toFixed(2)}</td></tr>`).join('');
+          const html = `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"/><title>كشف حساب مورد - ${escapeHtml(selectedSupplierProfile.name)}</title><style>
+            @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
+            *{font-family:'Cairo',sans-serif;box-sizing:border-box;} body{padding:12mm;color:#000;}
+            h1{font-size:22px;text-align:center;margin:0;} h2{font-size:13px;text-align:center;color:#555;margin:4px 0;font-weight:700;}
+            h3{font-size:14px;margin:16px 0 6px;} .sum{display:flex;gap:10px;justify-content:center;margin:10px 0;flex-wrap:wrap;}
+            .card{border:1px solid #ccc;border-radius:8px;padding:8px 14px;text-align:center;} .card b{display:block;font-size:16px;}
+            table{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px;} th,td{border:1px solid #ccc;padding:5px 7px;text-align:right;} thead th{background:#f1f5f9;font-weight:900;}
+            @media print{@page{size:A4;margin:8mm;}}
+          </style></head><body>
+            <h1>${escapeHtml(storeSettings.name)}</h1>
+            <h2>كشف حساب المورد: ${escapeHtml(selectedSupplierProfile.name)} — ${escapeHtml(selectedSupplierProfile.phone || '')}</h2>
+            <h2>${period}</h2>
+            <div class="sum">
+              <div class="card">إجمالي المشتريات<b>${totalPurchases.toFixed(2)} ${cur}</b></div>
+              <div class="card">المدفوع<b>${totalPaid.toFixed(2)} ${cur}</b></div>
+              <div class="card">المتبقّي (مديونية)<b>${totalDebt.toFixed(2)} ${cur}</b></div>
+            </div>
+            <h3>الأصناف المشتراة</h3>
+            <table><thead><tr><th>المنتج</th><th>الكمية</th><th>متوسط الشراء</th><th>آخر شراء</th><th>المتاح بالمخزون</th><th>المباع</th></tr></thead><tbody>${prodRows || '<tr><td colspan=6>لا يوجد</td></tr>'}</tbody></table>
+            <h3>الفواتير</h3>
+            <table><thead><tr><th>رقم</th><th>التاريخ</th><th>الإجمالي</th><th>المدفوع</th><th>المتبقّي</th></tr></thead><tbody>${invRows || '<tr><td colspan=5>لا يوجد</td></tr>'}</tbody></table>
+            <p style="margin-top:16px;font-size:11px;color:#888;text-align:center;">تم الإصدار: ${new Date().toLocaleString('ar-EG')}</p>
+            <script>window.onload=()=>{setTimeout(()=>{window.print();},400);}</script>
+          </body></html>`;
+          openPrintWindow(html);
+        };
+
         return (
           <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
             <div className="bg-white rounded-[40px] shadow-2xl w-full max-w-4xl overflow-hidden border border-slate-100 flex flex-col max-h-[90vh]">
-              <div className="p-8 border-b border-slate-100 flex justify-between items-start bg-white">
+              <div className="p-8 border-b border-slate-100 flex flex-wrap gap-3 justify-between items-start bg-white">
                 <div className="flex gap-6 items-center">
                   <div style={{ backgroundColor: tc }} className="w-16 h-16 rounded-3xl flex items-center justify-center text-white text-2xl font-black">
                     {selectedSupplierProfile.name.charAt(0)}
@@ -969,10 +919,20 @@ export default function Suppliers() {
                     <p className="text-slate-500 font-bold mt-1 flex items-center gap-2"><Phone size={14} /> {selectedSupplierProfile.phone}</p>
                   </div>
                 </div>
-                <button onClick={() => setShowSupplierProfile(false)} className="p-2 rounded-2xl hover:bg-slate-100 transition"><X size={24} /></button>
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  <div className="flex items-center gap-1 text-xs">
+                    <span className="text-slate-400 font-bold">من</span>
+                    <input type="date" value={supFrom} onChange={(e) => setSupFrom(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 font-bold" />
+                    <span className="text-slate-400 font-bold">إلى</span>
+                    <input type="date" value={supTo} onChange={(e) => setSupTo(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 font-bold" />
+                    {(supFrom || supTo) && <button onClick={() => { setSupFrom(''); setSupTo(''); }} className="text-slate-400 hover:text-red-500 px-1">✕</button>}
+                  </div>
+                  <button onClick={exportSupplierPDF} style={{ backgroundColor: tc }} className="text-white px-4 py-2.5 rounded-2xl font-bold text-sm flex items-center gap-2 hover:opacity-90 transition"><Download size={16} /> تصدير PDF</button>
+                  <button onClick={() => setShowSupplierProfile(false)} className="p-2 rounded-2xl hover:bg-slate-100 transition"><X size={24} /></button>
+                </div>
               </div>
 
-              <div className="p-8 bg-slate-50 flex-1 overflow-y-auto">
+              <div id="supplier-profile-pdf" className="p-8 bg-slate-50 flex-1 overflow-y-auto">
                 {/* Stats */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                   <div className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
@@ -1001,27 +961,18 @@ export default function Suppliers() {
                         <p className="text-sm text-slate-500 font-medium">اختر طريقة الدفع ووزع المبالغ المسددة</p>
                       </div>
                       <div className="bg-emerald-50 text-emerald-700 px-4 py-2 rounded-2xl font-black text-lg">
-                        إجمالي السداد: {(parseFloat(debtPaidCash || '0') + parseFloat(debtPaidVisa || '0') + parseFloat(debtPaidWallet || '0') + parseFloat(debtPaidInstapay || '0')).toLocaleString()}
+                        إجمالي السداد: {sumSplit(formToSplit(debtPay)).toLocaleString()}
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 relative z-10">
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block pr-2">💵 كاش</label>
-                        <input type="number" dir="ltr" value={debtPaidCash} onChange={e => setDebtPaidCash(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-black text-center" placeholder="0.00" />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block pr-2">💳 فيزا</label>
-                        <input type="number" dir="ltr" value={debtPaidVisa} onChange={e => setDebtPaidVisa(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-black text-center" placeholder="0.00" />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block pr-2">📱 محفظة</label>
-                        <input type="number" dir="ltr" value={debtPaidWallet} onChange={e => setDebtPaidWallet(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-black text-center" placeholder="0.00" />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block pr-2">⚡ انستا باي</label>
-                        <input type="number" dir="ltr" value={debtPaidInstapay} onChange={e => setDebtPaidInstapay(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-black text-center" placeholder="0.00" />
-                      </div>
+                    <div className="relative z-10">
+                      <PaymentSplitInputs
+                        value={debtPay}
+                        onChange={(k, v) => setDebtPay((s) => ({ ...s, [k]: v }))}
+                        cols={2}
+                        labelClassName="text-[10px] font-black text-slate-400 uppercase tracking-widest block pr-2"
+                        inputClassName="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-black text-center"
+                      />
                     </div>
 
                     <button 
@@ -1038,7 +989,7 @@ export default function Suppliers() {
                 <div className="bg-white rounded-[32px] border border-slate-100 shadow-sm overflow-hidden mb-8">
                   <div className="p-6 border-b border-slate-50 flex items-center justify-between">
                     <h3 className="font-black text-slate-800 flex items-center gap-2"><ShoppingCart size={18} style={{ color: tc }} /> الأصناف المشتراة من هذا المورد</h3>
-                    <span className="text-xs font-bold text-slate-400">{productStats.length} صنف</span>
+                    <span className="text-xs font-bold text-slate-400">{productStats.length} صنف · إجمالي القطع المشتراة: <span className="text-slate-700">{productStats.reduce((sum, s) => sum + s.totalQty, 0).toLocaleString()}</span></span>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-right text-sm">

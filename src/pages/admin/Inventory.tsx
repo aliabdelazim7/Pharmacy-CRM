@@ -1,15 +1,25 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useStore, type Product } from '../../store/useStore';
-import { Plus, Edit2, EyeOff, Eye, Search, X, Tag, FileText, Table as TableIcon, Box, AlertTriangle, TrendingUp, ScanLine, CheckCircle2 } from 'lucide-react';
+import { Plus, Edit2, EyeOff, Eye, Search, X, Tag, FileText, Table as TableIcon, Box, AlertTriangle, TrendingUp, ScanLine, CheckCircle2, Printer } from 'lucide-react';
 import { normalizeArabic } from '../../utils/textUtils';
 import { UNIT_OPTIONS, getUnitConfig, isFractionalUnit, formatQty } from '../../utils/units';
+import { generateBarcode, printBarcodeLabels } from '../../utils/printBarcodeLabels';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
+// html2canvas-pro يدعم ألوان oklch() في Tailwind v4 (النسخة الأصلية تفشل معها وتكسر تصدير PDF).
+import html2canvas from 'html2canvas-pro';
+
+// الخدمات لا نهائية الكمية: نخزّن لها مخزوناً كبيراً جداً حتى لا "تنفد" أبداً،
+// ونعرض "خدمة" بدل الرقم. هكذا يعمل منطق البيع/الخصم كما هو دون أي تعديل.
+const SERVICE_STOCK = 1_000_000;
+const isService = (p: any) => p?.type === 'service';
 
 export default function Inventory() {
-  const { products, categories, storeSettings, addProduct, updateProduct } = useStore();
+  const { products, categories, storeSettings, addProduct, updateProduct, orders } = useStore();
   const [searchQuery, setSearchQuery] = useState('');
+  const [stockLocation, setStockLocation] = useState<'all' | 'warehouse' | 'display'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'product' | 'service'>('all');
+  const [warehouseQty, setWarehouseQty] = useState(0); // كمية المستودع عند إضافة منتج جديد
   const [newCategoryName, setNewCategoryName] = useState('');
   const [showCatForm, setShowCatForm] = useState(false);
   const [showLowStock, setShowLowStock] = useState(false);
@@ -57,15 +67,31 @@ export default function Inventory() {
     purchase_price: 0,
     average_purchase_price: 0,
     sale_price: 0,
+    discount_price: 0,
+    wholesale_price: 0,
+    half_wholesale_price: 0,
+    type: 'product',
     stock_quantity: 0,
     display_quantity: 0,
-    season: '',
-    has_strips: false,
-    strips_per_box: 1,
-    strip_sale_price: 0,
     category_id: categories[0]?.id || '',
     unit: 'قطعة'
   });
+
+  // الكمية حسب المخزن المختار: الكل = الإجمالي، المعرض = المعروض، المستودع = الباقي.
+  const dispOf = (p: any) => Math.min(Number(p.display_quantity) || 0, Number(p.stock_quantity) || 0);
+  const qtyOf = (p: any) => stockLocation === 'display' ? dispOf(p)
+    : stockLocation === 'warehouse' ? ((Number(p.stock_quantity) || 0) - dispOf(p))
+    : (Number(p.stock_quantity) || 0);
+  // كمية مباعة لكل منتج (صافي بعد المرتجع).
+  const soldMap = useMemo(() => {
+    const m = new Map<string, number>();
+    orders.filter((o: any) => !o.is_deleted && o.type !== 'payment').forEach((o: any) => {
+      (o.items || []).forEach((it: any) => {
+        m.set(it.id, (m.get(it.id) || 0) + ((Number(it.quantity) || 0) - (Number(it.returned_quantity) || 0)));
+      });
+    });
+    return m;
+  }, [orders]);
 
   const normalizedSearch = normalizeArabic(searchQuery);
   const searchTerms = normalizedSearch.split(' ').filter(t => t.trim() !== '');
@@ -73,16 +99,23 @@ export default function Inventory() {
   const filteredProducts = products.filter(p => {
     const normalizedName = normalizeArabic(p.name);
     const matchesSearch = searchTerms.length === 0 || searchTerms.every(term => normalizedName.includes(term)) || (p.barcode && p.barcode.includes(searchQuery));
-    const matchesStock = showLowStock ? p.stock_quantity < 5 : true;
+    const matchesStock = showLowStock ? qtyOf(p) < 5 : true;
     const matchesHidden = showHidden ? p.is_hidden === true : !p.is_hidden; // showHidden=true → المخفيين فقط
     const matchesCategory = selectedCategory === 'all' || p.category_id === selectedCategory;
-    return matchesSearch && matchesStock && matchesHidden && matchesCategory;
+    const pType = isService(p) ? 'service' : 'product';
+    const matchesType = typeFilter === 'all' || pType === typeFilter;
+    return matchesSearch && matchesStock && matchesHidden && matchesCategory && matchesType;
   }).sort((a, b) => new Date((b as any).created_at || 0).getTime() - new Date((a as any).created_at || 0).getTime());
   const hiddenCount = products.filter(p => p.is_hidden).length;
-  
-  const totalStockValue = products.reduce((acc, p) => acc + (p.stock_quantity * (p.average_purchase_price || p.purchase_price || 0)), 0);
-  const lowStockCount = products.filter(p => p.stock_quantity < 5).length;
-  const totalItems = products.reduce((acc, p) => acc + p.stock_quantity, 0);
+
+  // الإحصائيات حسب الفلاتر المختارة (النوع + التصنيف + المخزن).
+  // الخدمات تُستبعَد من إحصائيات المخزون لأنها بلا كمية ولا تكلفة.
+  const statsBase = products.filter(p => !p.is_hidden && !isService(p)
+    && (selectedCategory === 'all' || p.category_id === selectedCategory)
+    && (typeFilter === 'all' || (isService(p) ? 'service' : 'product') === typeFilter));
+  const totalStockValue = statsBase.reduce((acc, p) => acc + (qtyOf(p) * (p.average_purchase_price || p.purchase_price || 0)), 0);
+  const lowStockCount = statsBase.filter(p => qtyOf(p) < 5).length;
+  const totalItems = statsBase.reduce((acc, p) => acc + qtyOf(p), 0);
 
   const handleToggleHide = (product: Product) => {
     const action = product.is_hidden ? 'إظهار' : 'إخفاء';
@@ -143,12 +176,12 @@ export default function Inventory() {
       purchase_price: product.purchase_price,
       average_purchase_price: product.average_purchase_price || product.purchase_price,
       sale_price: product.sale_price,
+      discount_price: product.discount_price || 0,
+      wholesale_price: product.wholesale_price || 0,
+      half_wholesale_price: product.half_wholesale_price || 0,
+      type: (product as any).type || 'product',
       stock_quantity: product.stock_quantity,
       display_quantity: product.display_quantity || 0,
-      season: product.season || '',
-      has_strips: product.has_strips || false,
-      strips_per_box: product.strips_per_box || 1,
-      strip_sale_price: product.strip_sale_price || 0,
       category_id: product.category_id,
       unit: product.unit || 'قطعة'
     });
@@ -163,37 +196,80 @@ export default function Inventory() {
       purchase_price: 0,
       average_purchase_price: 0,
       sale_price: 0,
+      discount_price: 0,
+      wholesale_price: 0,
+      half_wholesale_price: 0,
+      type: 'product',
       stock_quantity: 0,
       display_quantity: 0,
-      season: '',
-      has_strips: false,
-      strips_per_box: 1,
-      strip_sale_price: 0,
       category_id: categories[0]?.id || '',
       unit: 'قطعة'
     });
+    setWarehouseQty(0);
     setShowAddModal(true);
   };
 
   const submitProduct = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.name || !formData.barcode) {
-      alert("الرجاء ملء جميع الحقول المطلوبة (الاسم والباركود).");
+    if (!formData.name) {
+      alert("الرجاء إدخال اسم المنتج.");
       return;
     }
 
-    const duplicate = products.find(p => p.barcode === formData.barcode && p.id !== editingProductId);
+    // الباركود: لو فاضي يتولّد تلقائياً (النظام بيتعامل بالكود ده في البيع على الـ POS)
+    let barcode = (formData.barcode || '').trim();
+    if (!barcode) {
+      const existing = new Set(products.map(p => p.barcode).filter(Boolean) as string[]);
+      barcode = generateBarcode(existing);
+    }
+
+    const duplicate = products.find(p => p.barcode === barcode && p.id !== editingProductId);
     if (duplicate) {
-      alert(`عذراً، هذا الباركود مسجل من قبل للمنتج: "${duplicate.name}". يرجى إدخال باركود فريد.`);
+      alert(`عذراً, هذا الباركود مسجل من قبل للمنتج: "${duplicate.name}". يرجى إدخال باركود فريد.`);
       return;
     }
-    
-    if (editingProductId) {
-      updateProduct(editingProductId, { ...formData });
-    } else {
-      addProduct({ ...formData });
+
+    const serviceMode = formData.type === 'service';
+    let payload = { ...formData, barcode };
+
+    // خدمة: بلا سعر شراء وبلا كمية — نعطيها مخزوناً كبيراً حتى لا تنفد أبداً.
+    if (serviceMode) {
+      payload = {
+        ...payload,
+        purchase_price: 0,
+        average_purchase_price: 0,
+        stock_quantity: SERVICE_STOCK,
+        display_quantity: SERVICE_STOCK,
+      };
     }
-    
+
+    if (editingProductId) {
+      if (!serviceMode) {
+        // المعروض لا يتجاوز الإجمالي
+        payload = { ...payload, display_quantity: Math.min(Number(formData.display_quantity) || 0, Number(formData.stock_quantity) || 0) };
+      }
+      updateProduct(editingProductId, payload);
+    } else {
+      if (!serviceMode) {
+        // الإجمالي = مستودع + معروض، والمعروض يتسجّل كما هو
+        const display = Number(formData.display_quantity) || 0;
+        payload = { ...payload, stock_quantity: (Number(warehouseQty) || 0) + display, display_quantity: display };
+      }
+      addProduct(payload);
+      // طباعة ملصقات الباركود بعدد القطع المضافة (لا تُطبع للخدمات)
+      if (!serviceMode && payload.stock_quantity > 0) {
+        printBarcodeLabels({
+          name: payload.name,
+          code: barcode,
+          price: payload.sale_price,
+          discountPrice: payload.discount_price,
+          currency: storeSettings.currency,
+          count: payload.stock_quantity,
+          storeName: storeSettings.name,
+        });
+      }
+    }
+
     setShowAddModal(false);
     setEditingProductId(null);
     setFormData({
@@ -202,15 +278,16 @@ export default function Inventory() {
       purchase_price: 0,
       average_purchase_price: 0,
       sale_price: 0,
+      discount_price: 0,
+      wholesale_price: 0,
+      half_wholesale_price: 0,
+      type: 'product',
       stock_quantity: 0,
       display_quantity: 0,
-      season: '',
-      has_strips: false,
-      strips_per_box: 1,
-      strip_sale_price: 0,
       category_id: categories[0]?.id || '',
       unit: 'قطعة'
     });
+    setWarehouseQty(0);
   };
 
   const exportExcel = () => {
@@ -218,16 +295,19 @@ export default function Inventory() {
       ['تقرير المخزون والمنتجات', '', '', '', '', ''],
       ['التاريخ', new Date().toLocaleDateString(), '', '', '', ''],
       [''],
-      ['الباركود', 'اسم المنتج', 'التصنيف', 'الوحدة', 'سعر الشراء', 'متوسط الشراء', 'سعر البيع', 'المخزون'],
+      ['الباركود', 'اسم المنتج', 'التصنيف', 'الوحدة', 'سعر الشراء', 'متوسط الشراء', 'سعر البيع', `المخزون (${stockLocation === 'warehouse' ? 'المستودع' : stockLocation === 'display' ? 'المحل' : 'الكل'})`, 'مستودع', 'محل', 'مباع'],
       ...filteredProducts.map(p => [
         p.barcode,
         p.name,
         categories.find(c => c.id === p.category_id)?.name || '',
-        getUnitConfig(p.unit).label,
-        p.purchase_price,
-        p.average_purchase_price,
+        isService(p) ? 'خدمة' : getUnitConfig(p.unit).label,
+        isService(p) ? 0 : p.purchase_price,
+        isService(p) ? 0 : p.average_purchase_price,
         p.sale_price,
-        p.stock_quantity
+        isService(p) ? 'خدمة' : qtyOf(p),
+        isService(p) ? '—' : Math.max(0, (Number(p.stock_quantity) || 0) - dispOf(p)),
+        isService(p) ? '—' : dispOf(p),
+        soldMap.get(p.id) || 0
       ])
     ];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -333,7 +413,29 @@ export default function Inventory() {
           </div>
         </div>
       </div>
-      
+
+      {/* فلاتر: النوع + المخزن */}
+      <div className="flex items-center gap-3 flex-wrap mb-2">
+        <div className="flex items-center gap-2 bg-white rounded-2xl p-2 shadow-sm border border-slate-100 w-fit">
+          <span className="text-xs font-bold text-slate-500 px-2">النوع:</span>
+          {([['all', 'الكل'], ['product', 'منتجات'], ['service', 'خدمات']] as const).map(([k, label]) => (
+            <button key={k} onClick={() => setTypeFilter(k)}
+              className={`px-4 py-2 rounded-xl text-sm font-bold transition ${typeFilter === k ? 'bg-amber-500 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 bg-white rounded-2xl p-2 shadow-sm border border-slate-100 w-fit">
+          <span className="text-xs font-bold text-slate-500 px-2">المخزن:</span>
+          {([['all', 'الكل'], ['warehouse', 'المستودع'], ['display', 'المحل']] as const).map(([k, label]) => (
+            <button key={k} onClick={() => setStockLocation(k)}
+              className={`px-4 py-2 rounded-xl text-sm font-bold transition ${stockLocation === k ? 'bg-indigo-600 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* ADD PRODUCT MODAL */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
@@ -347,7 +449,21 @@ export default function Inventory() {
             <form onSubmit={submitProduct} className="p-6 space-y-4 overflow-y-auto">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
-                  <label className="block text-sm font-bold text-slate-700 mb-1">اسم المنتج <span className="text-red-500">*</span></label>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">النوع <span className="text-red-500">*</span></label>
+                  <div className="flex gap-2">
+                    {([['product','🛍️ منتج (له مخزون)'],['service','✂️ خدمة (بلا كمية)']] as const).map(([k,label]) => (
+                      <button type="button" key={k} onClick={() => setFormData({...formData, type: k})}
+                        className={`flex-1 py-2.5 rounded-xl font-bold text-sm transition border ${formData.type === k ? 'bg-indigo-600 text-white border-transparent' : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'}`}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {formData.type === 'service' && (
+                    <p className="text-xs text-emerald-600 mt-1 font-bold">الخدمة بلا كمية (متاحة دائماً) وبلا سعر شراء — تُدخِل سعر تقديم الخدمة فقط.</p>
+                  )}
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">اسم {formData.type === 'service' ? 'الخدمة' : 'المنتج'} <span className="text-red-500">*</span></label>
                   <input type="text" required value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none" />
                 </div>
                 <div className="sm:col-span-2 relative group">
@@ -385,64 +501,71 @@ export default function Inventory() {
                 </div>
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">سعر البيع لكل {getUnitConfig(formData.unit).label} <span className="text-red-500">*</span></label>
-                  <input type="number" min="0" step="0.01" required value={formData.sale_price} onChange={e => {
-                    const val = parseFloat(e.target.value) || 0;
-                    setFormData(prev => ({
-                      ...prev,
-                      sale_price: val,
-                      strip_sale_price: prev.has_strips ? val / (prev.strips_per_box || 1) : prev.strip_sale_price
-                    }));
-                  }} style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-green-500" />
+                  <input type="number" min="0" step="0.01" required value={formData.sale_price} onChange={e => setFormData({...formData, sale_price: parseFloat(e.target.value) || 0})} style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-green-500" />
                 </div>
                 <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">الكمية الحالية في المخزون</label>
-                  <div className="relative">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">سعر البيع بعد الخصم (اختياري)</label>
+                  <input type="number" min="0" step="0.01" value={formData.discount_price} onChange={e => setFormData({...formData, discount_price: parseFloat(e.target.value) || 0})} style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-amber-500" />
+                  <p className="text-xs text-slate-400 mt-1">لو دخلت قيمة هنا، هتبقى هي سعر البيع الفعلي على الكاشير. والباركود لو سيبته فاضي هيتولّد تلقائياً.</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">سعر نص الجملة <span className="text-[10px] text-slate-400">(اختياري)</span></label>
+                  <input type="number" min="0" step="0.01" value={formData.half_wholesale_price} onChange={e => setFormData({...formData, half_wholesale_price: parseFloat(e.target.value) || 0})} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-sky-500" />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">سعر الجملة <span className="text-[10px] text-slate-400">(اختياري)</span></label>
+                  <input type="number" min="0" step="0.01" value={formData.wholesale_price} onChange={e => setFormData({...formData, wholesale_price: parseFloat(e.target.value) || 0})} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-purple-500" />
+                </div>
+                {formData.type === 'service' ? null : !editingProductId ? (
+                  <>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">كمية المستودع</label>
+                      <input type="number" min="0" step={isFractionalUnit(formData.unit) ? '0.001' : '1'} value={warehouseQty}
+                        onChange={e => setWarehouseQty(parseFloat(e.target.value) || 0)}
+                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-blue-500" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">كمية المعروض (في المحل)</label>
+                      <input type="number" min="0" step={isFractionalUnit(formData.unit) ? '0.001' : '1'} value={formData.display_quantity}
+                        onChange={e => setFormData({...formData, display_quantity: parseFloat(e.target.value) || 0})}
+                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-emerald-500" />
+                      <p className="text-xs text-slate-400 mt-1">الإجمالي = {(Number(warehouseQty) || 0) + (Number(formData.display_quantity) || 0)} {getUnitConfig(formData.unit).label} · الافتراضي كله في المستودع.</p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">الإجمالي في المخزون</label>
+                      <input type="number" min="0" step={isFractionalUnit(formData.unit) ? '0.001' : '1'} value={formData.stock_quantity}
+                        onChange={e => setFormData({...formData, stock_quantity: parseFloat(e.target.value) || 0})}
+                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-blue-500" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">المعروض في المحل (النقل بين المستودع والمحل)</label>
+                      <input type="number" min="0" max={formData.stock_quantity} step={isFractionalUnit(formData.unit) ? '0.001' : '1'} value={formData.display_quantity}
+                        onChange={e => setFormData({...formData, display_quantity: Math.min(parseFloat(e.target.value) || 0, formData.stock_quantity)})}
+                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-emerald-500" />
+                      <p className="text-xs text-slate-400 mt-1">المستودع: <b>{Math.max(0, (Number(formData.stock_quantity) || 0) - (Number(formData.display_quantity) || 0))}</b> · المعروض: <b>{Math.min(Number(formData.display_quantity) || 0, Number(formData.stock_quantity) || 0)}</b> · المُباع: <b>{soldMap.get(editingProductId) || 0}</b></p>
+                    </div>
+                  </>
+                )}
+                {formData.type !== 'service' && (
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">تكلفة شراء الـ{getUnitConfig(formData.unit).label} <span className="text-[10px] text-slate-400">(اختياري)</span></label>
                     <input
-                      type="number" min="0" step={isFractionalUnit(formData.unit) ? '0.001' : '1'}
-                      value={formData.stock_quantity}
-                      onChange={e => setFormData({...formData, stock_quantity: parseFloat(e.target.value) || 0})}
+                      type="number" min="0" step="0.01"
+                      value={formData.purchase_price}
+                      onChange={e => { const v = parseFloat(e.target.value) || 0; setFormData({...formData, purchase_price: v, average_purchase_price: v}); }}
                       style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
-                      className="w-full bg-slate-50 border border-slate-200 py-3 pl-16 pr-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-blue-500"
+                      className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-amber-500"
                     />
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 pointer-events-none">{getUnitConfig(formData.unit).label}</span>
                   </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">تكلفة شراء الـ{getUnitConfig(formData.unit).label} <span className="text-[10px] text-slate-400">(اختياري)</span></label>
-                  <input
-                    type="number" min="0" step="0.01"
-                    value={formData.purchase_price}
-                    onChange={e => { const v = parseFloat(e.target.value) || 0; setFormData({...formData, purchase_price: v, average_purchase_price: v}); }}
-                    style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
-                    className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-amber-500"
-                  />
-                </div>
-                <div className="sm:col-span-2">
-                  <p className="text-xs text-slate-400 -mt-1">ℹ️ هذه كمية وتكلفة المخزون الافتتاحي — بعدها يتم التحديث تلقائياً عبر فواتير المشتريات. يمكن تعديل سعر البيع لاحقاً.</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">الكمية المعروضة في المحل</label>
-                  <div className="relative">
-                    <input
-                      type="number" min="0" max={formData.stock_quantity} step={isFractionalUnit(formData.unit) ? '0.001' : '1'}
-                      value={formData.display_quantity}
-                      onChange={e => setFormData({...formData, display_quantity: Math.min(parseFloat(e.target.value) || 0, formData.stock_quantity)})}
-                      style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
-                      className="w-full bg-slate-50 border border-slate-200 py-3 pl-16 pr-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-purple-500"
-                    />
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 pointer-events-none">{getUnitConfig(formData.unit).label}</span>
+                )}
+                {formData.type !== 'service' && (
+                  <div className="sm:col-span-2">
+                    <p className="text-xs text-slate-400 -mt-1">ℹ️ هذه كمية وتكلفة المخزون الافتتاحي — بعدها يتم التحديث تلقائياً عبر فواتير المشتريات. يمكن تعديل سعر البيع لاحقاً.</p>
                   </div>
-                  <p className="text-[10px] text-slate-400 mt-1">المتبقي في المستودع: <b>{Math.max(0, formData.stock_quantity - (formData.display_quantity || 0))}</b></p>
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-1">الموسم</label>
-                  <select value={formData.season} onChange={e => setFormData({...formData, season: e.target.value})} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:ring-indigo-500">
-                    <option value="">لا يوجد موسم</option>
-                    <option value="summer">صيفي</option>
-                    <option value="winter">شتوي</option>
-                    <option value="annual">سنوي</option>
-                  </select>
-                </div>
+                )}
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-bold text-slate-700 mb-1">التصنيف</label>
                   <select value={formData.category_id} onChange={e => setFormData({...formData, category_id: e.target.value})} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:ring-indigo-500">
@@ -451,54 +574,6 @@ export default function Inventory() {
                     ))}
                   </select>
                 </div>
-                {formData.unit === 'علبة' && (
-                  <div className="sm:col-span-2 border-t pt-4 mt-2 space-y-4">
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        id="has_strips"
-                        checked={formData.has_strips}
-                        onChange={e => setFormData(prev => ({ 
-                          ...prev, 
-                          has_strips: e.target.checked,
-                          strip_sale_price: e.target.checked ? prev.sale_price / (prev.strips_per_box || 1) : 0 
-                        }))}
-                        className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
-                      />
-                      <label htmlFor="has_strips" className="text-sm font-bold text-slate-700 select-none">يحتوي على شرائط (حبوب)</label>
-                    </div>
-
-                    {formData.has_strips && (
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-sm font-bold text-slate-700 mb-1">عدد الشرائط بالعلبة</label>
-                          <input
-                            type="number" min="1" step="1"
-                            value={formData.strips_per_box}
-                            onChange={e => {
-                              const val = parseInt(e.target.value) || 1;
-                              setFormData(prev => ({
-                                ...prev,
-                                strips_per_box: val,
-                                strip_sale_price: prev.sale_price / val
-                              }));
-                            }}
-                            className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-bold text-slate-700 mb-1">سعر بيع الشريط الواحد</label>
-                          <input
-                            type="number" min="0" step="0.01"
-                            value={formData.strip_sale_price}
-                            onChange={e => setFormData({...formData, strip_sale_price: parseFloat(e.target.value) || 0})}
-                            className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-amber-500"
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
               <div className="pt-4 mt-2 border-t">
                 <button type="submit" style={{ backgroundColor: storeSettings.themeColor }} className="w-full text-white py-4 rounded-xl font-bold transition shadow-lg shrink-0 flex items-center justify-center gap-2">
@@ -574,7 +649,7 @@ export default function Inventory() {
         <div>
           <h2 className="text-xl font-black text-slate-800">المنتجات</h2>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <div className="flex gap-2">
             <button 
               onClick={exportExcel}
@@ -662,8 +737,9 @@ export default function Inventory() {
             <tbody className="divide-y divide-slate-100 text-slate-700">
               {filteredProducts.map((product) => {
                 const category = categories.find(c => c.id === product.category_id)?.name;
-                const isLowStock = product.stock_quantity < 5;
-                
+                const service = isService(product);
+                const isLowStock = !service && qtyOf(product) < 5;
+
                 return (
                   <tr key={product.id} className={`hover:bg-slate-50 transition ${product.is_hidden ? 'opacity-50 bg-slate-50/80' : ''}`}>
                     <td className="p-4 font-mono text-slate-400">
@@ -672,13 +748,18 @@ export default function Inventory() {
                         <span className="mr-2 text-[10px] font-black bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded">مخفي</span>
                       )}
                     </td>
-                    <td className={`p-4 font-bold ${product.is_hidden ? 'line-through text-slate-400' : ''}`}>{product.name}</td>
+                    <td className={`p-4 font-bold ${product.is_hidden ? 'line-through text-slate-400' : ''}`}>
+                      {product.name}
+                      {service && (
+                        <span className="mr-2 text-[10px] font-black bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">خدمة</span>
+                      )}
+                    </td>
                     <td className="p-4 text-slate-500">{category}</td>
                     <td className="p-4 text-center">
-                      <span className="text-xs font-bold bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">{getUnitConfig(product.unit).label}</span>
+                      <span className="text-xs font-bold bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">{service ? 'خدمة' : getUnitConfig(product.unit).label}</span>
                     </td>
-                    <td className="p-4 text-center">{product.purchase_price} {storeSettings.currency}</td>
-                    <td className="p-4 text-center font-bold text-indigo-600 bg-indigo-50/30">{product.average_purchase_price} {storeSettings.currency}</td>
+                    <td className="p-4 text-center">{service ? '—' : `${product.purchase_price} ${storeSettings.currency}`}</td>
+                    <td className="p-4 text-center font-bold text-indigo-600 bg-indigo-50/30">{service ? '—' : `${product.average_purchase_price} ${storeSettings.currency}`}</td>
 
                     <td className="p-4 text-center border-x border-slate-100 bg-slate-50/50">
                       <button onClick={() => handleEditPrice(product)} style={{ '--hover-color': storeSettings.themeColor } as any} className="flex items-center justify-center gap-2 w-full hover:text-[var(--hover-color)] transition group font-black">
@@ -688,20 +769,44 @@ export default function Inventory() {
                     </td>
 
                     <td className="p-4 text-center border-l border-slate-100 bg-slate-50/50">
-                      <button
-                        onClick={() => handleEditStock(product)}
-                        style={{ '--hover-bg': storeSettings.themeColor + '15', '--hover-text': storeSettings.themeColor } as any}
-                        className={`flex items-center justify-center gap-2 w-full font-bold px-3 py-1.5 rounded-lg transition group ${isLowStock ? 'bg-red-50 text-red-600' : 'hover:bg-[var(--hover-bg)] hover:text-[var(--hover-text)]'}`}
-                      >
-                        {formatQty(product.stock_quantity, product.unit)}
-                        <Edit2 size={14} className="opacity-0 group-hover:opacity-100" />
-                      </button>
+                      {service ? (
+                        <span className="inline-flex items-center gap-1 font-bold text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-lg">خدمة · متاحة دائماً</span>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => handleEditStock(product)}
+                            style={{ '--hover-bg': storeSettings.themeColor + '15', '--hover-text': storeSettings.themeColor } as any}
+                            className={`flex items-center justify-center gap-2 w-full font-bold px-3 py-1.5 rounded-lg transition group ${isLowStock ? 'bg-red-50 text-red-600' : 'hover:bg-[var(--hover-bg)] hover:text-[var(--hover-text)]'}`}
+                          >
+                            {formatQty(qtyOf(product), product.unit)}
+                            <Edit2 size={14} className="opacity-0 group-hover:opacity-100" />
+                          </button>
+                          <div className="text-[9px] text-slate-400 mt-1">مستودع {Math.max(0, (Number(product.stock_quantity) || 0) - dispOf(product))} · محل {dispOf(product)}</div>
+                        </>
+                      )}
                     </td>
 
                     <td className="p-4">
                       <div className="flex items-center justify-center gap-2">
                         <button onClick={() => openEditModal(product)} className="p-2 text-indigo-400 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition" title="تعديل المنتج">
                           <Edit2 size={18} />
+                        </button>
+                        <button
+                          onClick={() => {
+                            const code = product.barcode || generateBarcode(new Set(products.map(p => p.barcode).filter(Boolean) as string[]));
+                            if (!product.barcode) updateProduct(product.id, { barcode: code });
+                            const n = prompt('عدد ملصقات الباركود المراد طباعتها:', String(product.stock_quantity || 1));
+                            if (n === null) return;
+                            printBarcodeLabels({
+                              name: product.name, code,
+                              price: product.sale_price, discountPrice: product.discount_price,
+                              currency: storeSettings.currency, count: parseInt(n) || 1, storeName: storeSettings.name,
+                            });
+                          }}
+                          className="p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700 rounded-lg transition"
+                          title="طباعة باركود"
+                        >
+                          <Printer size={18} />
                         </button>
                         {/* زر الإخفاء/الإظهار بدلاً من الحذف */}
                         <button

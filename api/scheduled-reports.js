@@ -3,6 +3,7 @@ import {
   cairoDayRange,
   currentMonthRange,
   fetchReportData,
+  fetchOpeningBalance,
   fetchStoreSettings,
   getSupabase,
   isLastCairoDayOfMonth,
@@ -89,12 +90,20 @@ export default async function handler(req, res) {
   try {
     const supabase = getSupabase();
     const settings = await fetchStoreSettings(supabase);
-    const today = new Date();
+    // Optional ?date=YYYY-MM-DD to (re)send the report for a specific Cairo day
+    // (used for manual testing / catching up a missed day). Defaults to "now".
+    const dateParam = (req.query && (req.query.date || req.query.day)) || (req.body && req.body.date);
+    // بدون date: نطرح ساعتين من وقت التشغيل حتى لو اشتغل الكرون متأخراً (نافذة الـ
+    // ساعة المرنة في Hobby) يظل التقرير على اليوم الصحيح الذي انتهى، لا اليوم الجديد الفارغ.
+    const today = dateParam ? new Date(`${dateParam}T12:00:00+03:00`) : new Date(Date.now() - 2 * 60 * 60 * 1000);
     const sent = [];
 
     const dayRange = cairoDayRange(today);
-    const dayData = await fetchReportData(supabase, dayRange.start, dayRange.end);
-    await sendTelegramText(buildDailyMessage(settings, dayRange, dayData));
+    const [dayData, openingBalance] = await Promise.all([
+      fetchReportData(supabase, dayRange.start, dayRange.end),
+      fetchOpeningBalance(supabase, dayRange.start),
+    ]);
+    await sendTelegramText(buildDailyMessage(settings, dayRange, dayData, openingBalance));
     sent.push('daily');
 
     sent.push(...await sendFinancingReminders(supabase, settings, today));

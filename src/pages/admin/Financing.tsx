@@ -235,7 +235,7 @@ export default function Financing() {
           </span>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 mt-5">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-5">
           <div className="bg-emerald-50 rounded-xl p-3">
             <p className="text-[10px] font-black text-emerald-600">التحصيل</p>
             <p className="font-black text-emerald-800 mt-1">{money(account.collection_amount, storeSettings.currency)}</p>
@@ -280,7 +280,7 @@ export default function Financing() {
           <h1 className="text-3xl font-black text-slate-800">السلف والجمعيات</h1>
           <p className="text-slate-500 mt-2 font-medium">ملفات مستقلة لكل سلفة أو جمعية، مع تحصيل وسداد جزئي وسجل معاملات واضح.</p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex gap-2">
           <button onClick={() => openForm('loan')} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3 rounded-2xl font-black flex items-center gap-2 shadow-lg">
             <Plus size={18} /> سلفة جديدة
           </button>
@@ -514,7 +514,7 @@ export default function Financing() {
 
       {paymentTarget && (
         <div className="fixed inset-0 bg-slate-900/50 z-[60] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-5">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto p-5">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-black text-slate-800">
                 {paymentTarget.payment_type === 'collection' ? 'تحصيل' : 'سداد'} جزئي / كامل

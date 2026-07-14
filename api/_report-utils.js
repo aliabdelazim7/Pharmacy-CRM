@@ -78,18 +78,23 @@ export async function sendTelegramText(text) {
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) throw new Error('Missing Telegram environment variables');
 
-  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: text.slice(0, 3900),
-      disable_web_page_preview: false,
-    }),
-  });
-  const result = await response.json();
-  if (!response.ok) throw new Error(JSON.stringify(result));
-  return result;
+  // TELEGRAM_CHAT_ID may be a comma-separated list to notify several people.
+  const chatIds = String(chatId).split(',').map((s) => s.trim()).filter(Boolean);
+  let lastResult = null;
+  for (const cid of chatIds) {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: cid,
+        text: text.slice(0, 3900),
+        disable_web_page_preview: false,
+      }),
+    });
+    lastResult = await response.json();
+    if (!response.ok) throw new Error(JSON.stringify(lastResult));
+  }
+  return lastResult;
 }
 
 export async function fetchStoreSettings(supabase) {
@@ -126,12 +131,21 @@ export async function fetchReportData(supabase, start, end) {
     supabase.from('products').select('*').order('name'),
   ]);
 
+  // الخزائن والعهد (جداول قد لا تكون موجودة في قواعد قديمة → نتجاهل الخطأ)
+  const safe = async (q) => { try { const r = await q; return r.data || []; } catch { return []; } };
+  const [savings, partnerTxns] = await Promise.all([
+    safe(supabase.from('savings_transactions').select('*').gte('created_at', start.toISOString()).lt('created_at', end.toISOString())),
+    safe(supabase.from('partner_transactions').select('*').gte('created_at', start.toISOString()).lt('created_at', end.toISOString())),
+  ]);
+
   return {
     orders: ordersRes.data || [],
     expenses: expensesRes.data || [],
     purchases: purchasesRes.data || [],
     employeeTransactions: employeeTransactionsRes.data || [],
     products: productsRes.data || [],
+    savings,
+    partnerTxns,
   };
 }
 

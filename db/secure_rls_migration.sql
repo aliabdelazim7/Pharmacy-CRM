@@ -40,7 +40,9 @@ declare
     'orders','invoice_counter','order_items','expenses',
     'financing_accounts','financing_payments','financing_transactions',
     'cashiers','employees','employee_transactions','employee_leaves',
-    'product_suggestions','cashier_notes','coupons','deleted_invoices'
+    'product_suggestions','cashier_notes','coupons','deleted_invoices',
+    'materials','production_orders','production_materials','managers',
+    'partners','partner_transactions','savings_transactions','stock_adjustments','admin_users'
   ];
 begin
   foreach t in array tables loop
@@ -99,13 +101,13 @@ begin
            'customers', (select to_jsonb(c) from customers c where c.id = o.customer_id),
            'order_items', (
              select coalesce(jsonb_agg(to_jsonb(oi) || jsonb_build_object(
-                      'products', (select jsonb_build_object('name', p.name) from products p where p.id = oi.product_id)
+                      'products', (select jsonb_build_object('name', p.name, 'sale_price', p.sale_price, 'discount_price', p.discount_price) from products p where p.id = oi.product_id)
                     )), '[]'::jsonb)
              from order_items oi where oi.order_id = o.id
            )
          ), o.customer_id
     into v_order, v_customer_id
-  from orders o where o.id = p_id;
+  from orders o where o.id::text = p_id;
 
   if v_order is not null then
     if v_customer_id is not null then
@@ -135,14 +137,14 @@ begin
              'car_subscriptions', (select to_jsonb(cs) from car_subscriptions cs where cs.id = a.subscription_id)
            ), a.subscription_id
       into v_appointment, v_subscription_id
-    from maintenance_appointments a where a.id = p_id;
+    from maintenance_appointments a where a.id::text = p_id;
 
     if v_appointment is not null then
       select coalesce(jsonb_agg(
                to_jsonb(o) || jsonb_build_object(
                  'order_items', (
                    select coalesce(jsonb_agg(to_jsonb(oi) || jsonb_build_object(
-                            'products', (select jsonb_build_object('name', p.name) from products p where p.id = oi.product_id)
+                            'products', (select jsonb_build_object('name', p.name, 'sale_price', p.sale_price, 'discount_price', p.discount_price) from products p where p.id = oi.product_id)
                           )), '[]'::jsonb)
                    from order_items oi where oi.order_id = o.id
                  )
@@ -162,7 +164,7 @@ begin
            'suppliers', (select to_jsonb(su) from suppliers su where su.id = pi.supplier_id),
            'purchase_items', (
              select coalesce(jsonb_agg(to_jsonb(it) || jsonb_build_object(
-                      'products', (select jsonb_build_object('name', p.name) from products p where p.id = it.product_id)
+                      'products', (select jsonb_build_object('name', p.name, 'sale_price', p.sale_price, 'discount_price', p.discount_price) from products p where p.id = it.product_id)
                     )), '[]'::jsonb)
              from purchase_items it where it.invoice_id = pi.id
            )

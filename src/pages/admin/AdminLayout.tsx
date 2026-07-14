@@ -1,11 +1,13 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Package, Settings, LogOut, FileText, Users, BarChart3, Wallet, MessageCircle, CreditCard, Building2, BellRing, WifiOff, Ticket, PieChart, Car, Menu, X, ClipboardCheck } from 'lucide-react';
+import { LayoutDashboard, Package, Settings, LogOut, FileText, Users, BarChart3, Wallet, MessageCircle, CreditCard, Building2, BellRing, WifiOff, Ticket, PieChart, Briefcase, Handshake, PiggyBank, ClipboardCheck, FileBarChart, Menu, X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { useEffect, useState } from 'react';
 
 export default function AdminLayout() {
   const navigate = useNavigate();
-  const { storeSettings, logout, maintenanceAppointments, carSubscriptions, updateMaintenanceReminded } = useStore();
+  const { storeSettings, logout, maintenanceAppointments, carSubscriptions, updateMaintenanceReminded, adminPermissions } = useStore();
+  const isOwner = adminPermissions === null;
+  const canSee = (path: string) => isOwner || (adminPermissions || []).includes(path);
   const [hasCheckedReminders, setHasCheckedReminders] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -45,26 +47,46 @@ export default function AdminLayout() {
     checkReminders();
   }, [maintenanceAppointments, carSubscriptions, hasCheckedReminders, updateMaintenanceReminded]);
 
-  const navItems = [
-    { name: 'نظرة عامة', path: '/admin/overview', icon: LayoutDashboard },
-    { name: 'التحليلات والتقارير', path: '/admin/analytics', icon: BarChart3 },
-    { name: 'المخزون والمنتجات', path: '/admin/inventory', icon: Package },
-    { name: 'الجرد والتسوية', path: '/admin/stocktake', icon: ClipboardCheck },
-    { name: 'الفواتير والمرتجعات', path: '/admin/invoices', icon: FileText },
-    { name: 'قاعدة العملاء', path: '/admin/customers', icon: Users },
-    { name: 'حملات واتساب', path: '/admin/whatsapp-campaigns', icon: MessageCircle },
-    { name: 'الموردين والمشتريات', path: '/admin/suppliers', icon: Users },
-    { name: 'حسابات الآجل', path: '/admin/deferred', icon: CreditCard },
-    { name: 'إدارة المحاسبين', path: '/admin/cashiers', icon: Users },
-    { name: 'الرواتب والموظفين', path: '/admin/employees', icon: Users },
-    { name: 'الخزينة والمصاريف', path: '/admin/finance', icon: Wallet },
-    { name: 'سلف وتمويل', path: '/admin/financing', icon: Building2 },
-    { name: 'الميزانية العامة', path: '/admin/budget', icon: PieChart },
-    { name: 'الفواتير الأوفلاين', path: '/admin/offline-invoices', icon: WifiOff },
-    { name: 'كوبونات الخصم', path: '/admin/coupons', icon: Ticket },
-    { name: 'تنبيهات النواقص', path: '/admin/stock-alerts', icon: BellRing },
-    { name: 'إعدادات النظام', path: '/admin/settings', icon: Settings },
-    { name: 'صيانة السيارات', path: '/admin/car-maintenance', icon: Car },
+  const navGroups = [
+    { section: 'عام', items: [
+      { name: 'نظرة عامة', path: '/admin/overview', icon: LayoutDashboard },
+      { name: 'التحليلات والتقارير', path: '/admin/analytics', icon: BarChart3 },
+      { name: 'التقارير وكشوف الحساب', path: '/admin/reports', icon: FileBarChart },
+    ]},
+    { section: 'المبيعات والفواتير', items: [
+      { name: 'الفواتير والمرتجعات', path: '/admin/invoices', icon: FileText },
+      { name: 'الفواتير الأوفلاين', path: '/admin/offline-invoices', icon: WifiOff },
+      { name: 'كوبونات الخصم', path: '/admin/coupons', icon: Ticket },
+    ]},
+    { section: 'المخزون', items: [
+      { name: 'المخزون والمنتجات', path: '/admin/inventory', icon: Package },
+      { name: 'الجرد والتسوية', path: '/admin/stocktake', icon: ClipboardCheck },
+      { name: 'تنبيهات النواقص', path: '/admin/stock-alerts', icon: BellRing },
+    ]},
+    { section: 'العملاء', items: [
+      { name: 'قاعدة العملاء', path: '/admin/customers', icon: Users },
+      { name: 'حسابات الآجل', path: '/admin/deferred', icon: CreditCard },
+      { name: 'حملات واتساب', path: '/admin/whatsapp-campaigns', icon: MessageCircle },
+    ]},
+    { section: 'الموردين', items: [
+      { name: 'الموردين والمشتريات', path: '/admin/suppliers', icon: Users },
+    ]},
+    { section: 'المالية والخزائن', items: [
+      { name: 'الخزينة والمصاريف', path: '/admin/finance', icon: Wallet },
+      { name: 'خزنة الادخار', path: '/admin/savings', icon: PiggyBank },
+      { name: 'الميزانية العامة', path: '/admin/budget', icon: PieChart },
+      { name: 'سلف وتمويل', path: '/admin/financing', icon: Building2 },
+      { name: 'المدراء والسحوبات', path: '/admin/managers', icon: Briefcase },
+      { name: 'الشركاء', path: '/admin/partners', icon: Handshake },
+    ]},
+    { section: 'الموظفين', items: [
+      { name: 'إدارة المحاسبين', path: '/admin/cashiers', icon: Users },
+      { name: 'الرواتب والموظفين', path: '/admin/employees', icon: Users },
+    ]},
+    { section: 'الإعدادات', items: [
+      { name: 'إعدادات النظام', path: '/admin/settings', icon: Settings },
+      ...(isOwner ? [{ name: 'مستخدمو لوحة التحكم', path: '/admin/users', icon: Users }] : []),
+    ]},
   ];
 
   const handleLogout = () => {
@@ -85,9 +107,9 @@ export default function AdminLayout() {
 
       {/* Sidebar — ثابت على الكمبيوتر، Drawer منزلق على الموبايل */}
       <div className={`fixed lg:static inset-y-0 right-0 w-72 max-w-[85vw] bg-slate-900 text-slate-300 flex flex-col shadow-2xl z-40 transform transition-transform duration-300 ${sidebarOpen ? 'translate-x-0' : 'translate-x-full'} lg:translate-x-0 lg:w-64`}>
-        <div className="p-6 pb-2 flex items-center justify-between gap-2">
+        <div className="p-5 pb-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-3 bg-slate-800 p-3 rounded-2xl border border-slate-700 flex-1 min-w-0">
-            <img src={storeSettings.logo} alt="Logo" className="w-10 h-10 rounded-xl bg-white object-cover" />
+            <img src={storeSettings.logo} alt="Logo" className="h-10 w-auto max-w-[120px] rounded-xl bg-white object-contain" />
             <div className="flex flex-col flex-1 min-w-0">
               <span className="font-bold text-white text-sm truncate" title={storeSettings.name}>{storeSettings.name}</span>
               <span className="text-xs text-slate-400">لوحة الإدارة</span>
@@ -98,25 +120,36 @@ export default function AdminLayout() {
           </button>
         </div>
 
-        <nav className="flex-1 px-4 space-y-1 overflow-y-auto mt-6">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              onClick={() => setSidebarOpen(false)}
-              style={({ isActive }) => isActive ? { background: storeSettings.themeColor } : {}}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-4 py-2.5 rounded-xl transition ${
-                  isActive
-                    ? 'text-white font-bold shadow-lg'
-                    : 'hover:bg-slate-800 hover:text-white'
-                }`
-              }
-            >
-              <item.icon size={20} />
-              {item.name}
-            </NavLink>
-          ))}
+        <nav className="flex-1 px-4 pb-4 overflow-y-auto mt-4">
+          {navGroups.map((group) => {
+            const visible = group.items.filter((item) => canSee(item.path));
+            if (visible.length === 0) return null;
+            return (
+            <div key={group.section} className="mb-3">
+              <p className="text-[10px] font-black text-slate-500 uppercase tracking-wider px-4 mb-1.5">{group.section}</p>
+              <div className="space-y-1">
+                {visible.map((item) => (
+                  <NavLink
+                    key={item.path}
+                    to={item.path}
+                    onClick={() => setSidebarOpen(false)}
+                    style={({ isActive }) => isActive ? { background: storeSettings.themeColor } : {}}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-4 py-3 lg:py-2.5 rounded-xl transition text-sm ${
+                        isActive
+                          ? 'text-white font-bold shadow-lg'
+                          : 'hover:bg-slate-800 hover:text-white'
+                      }`
+                    }
+                  >
+                    <item.icon size={18} />
+                    {item.name}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
+            );
+          })}
         </nav>
 
         <div className="p-4 border-t border-slate-800">

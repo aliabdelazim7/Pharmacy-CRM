@@ -2,6 +2,37 @@ import { create } from 'zustand';
 import { supabase } from '../lib/supabase';
 import { unitMinQty, unitStep } from '../utils/units';
 
+// Effective unit price for the current invoice type (retail / half-wholesale / wholesale).
+function priceForType(product: any, type: string): number {
+  if (type === 'wholesale') return (product.wholesale_price && product.wholesale_price > 0) ? product.wholesale_price : product.sale_price;
+  if (type === 'half') return (product.half_wholesale_price && product.half_wholesale_price > 0) ? product.half_wholesale_price : product.sale_price;
+  return (product.discount_price && product.discount_price > 0) ? product.discount_price : product.sale_price;
+}
+
+// Creates/updates the Supabase Auth account for a cashier via the server
+// endpoint (which holds the service-role key), so a cashier added from the
+// admin panel can log in immediately. Best-effort: in local dev (no /api) or on
+// failure it silently no-ops, and you can still run the provisioning script.
+async function provisionCashierAuth(id: string, password: string, table?: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { data: sess } = await supabase.auth.getSession();
+    const token = sess?.session?.access_token;
+    if (!token) return { ok: false, error: 'لا توجد جلسة دخول حالية' };
+    const res = await fetch('/api/provision-cashier', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ id, password, table }),
+    });
+    if (res.ok) return { ok: true };
+    let msg = 'HTTP ' + res.status;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* ignore */ }
+    return { ok: false, error: msg };
+  } catch (e) {
+    console.warn('provisionCashierAuth failed:', e);
+    return { ok: false, error: String((e as Error)?.message || e) };
+  }
+}
+
 // ─── Types ───────────────────────────────────────────────────
 export interface Product {
   id: string;
@@ -10,15 +41,45 @@ export interface Product {
   purchase_price: number;
   average_purchase_price: number;
   sale_price: number;
+  discount_price?: number; // سعر البيع بعد الخصم (قطاعي)
+  wholesale_price?: number; // سعر الجملة
+  half_wholesale_price?: number; // سعر نص الجملة
+  season?: string; // 'summer' / 'winter' (غير مستخدم في نسخة الباربر شوب)
+  type?: string; // 'product' (منتج له مخزون) | 'service' (خدمة بلا كمية ولا سعر شراء)
   stock_quantity: number;
-  display_quantity?: number; // الكمية المعروضة في المحل
-  season?: string; // الموسم: 'summer' | 'winter' | 'annual'
-  has_strips?: boolean; // هل الدواء حبوب يباع بالعلبة/الشريط؟
-  strips_per_box?: number; // عدد الشرائط بالعلبة
-  strip_sale_price?: number; // سعر الشريط
+  display_quantity?: number; // الكمية المعروضة في المحل (الباقي في المستودع)
+  factory_quantity?: number; // كمية مخزن المصنع (غير متاحة للبيع حتى تُحوَّل)
   category_id: string;
   unit: string; // وحدة المنتج: قطعة / كيلو / جرام / لتر ... (المخزون والسعر بهذه الوحدة)
   is_hidden?: boolean; // إخفاء المنتج من الكاشير دون حذفه
+  color?: string; // لون المنتج (للملابس)
+}
+
+// ── التصنيع ──────────────────────────────────────────────────
+export interface Material {
+  id: string;
+  name: string;
+  unit: string;
+  cost_per_unit: number;
+  stock_quantity: number;
+  supplier_id?: string; // المورد الذي تُشترى منه الخامة (اختياري)
+  created_at?: string;
+}
+
+export interface ProductionOrder {
+  id: string;
+  product_id?: string;
+  product_name: string;
+  color?: string;
+  code?: string;
+  quantity: number;
+  materials_cost: number;
+  extra_costs: number;
+  total_cost: number;
+  cost_per_piece: number;
+  sale_price: number;
+  notes?: string;
+  created_at?: string;
 }
 
 export interface Category {
@@ -78,11 +139,12 @@ export interface PurchaseInvoice {
   paid_visa: number;
   paid_wallet: number;
   paid_instapay: number;
-  payment_method: 'cash' | 'visa' | 'wallet' | 'instapay';
+  paid_method5?: number;
+  paid_method6?: number;
+  payment_method: 'cash' | 'visa' | 'wallet' | 'instapay' | 'method5' | 'method6';
   created_at: string;
   notes?: string;
   items?: PurchaseItem[];
-  type?: 'purchase' | 'return';
 }
 
 export interface Order {
@@ -94,12 +156,17 @@ export interface Order {
   paid_visa: number;
   paid_wallet: number;
   paid_instapay: number;
+  paid_method5?: number;
+  paid_method6?: number;
   type: 'sale' | 'payment' | 'previous_debt';
   date: string;
-  payment_method: 'cash' | 'visa' | 'wallet' | 'instapay';
+  payment_method: 'cash' | 'visa' | 'wallet' | 'instapay' | 'method5' | 'method6';
   refund_method?: string;
   customer?: Customer;
   cashier_name?: string;
+  salesperson_id?: string; // الموظف البائع الأساسي (توافق للخلف — أول كابتن)
+  salesperson_name?: string;
+  salespeople?: { id: string; name: string }[]; // الكباتن المنفّذون (قد يكونوا أكثر من واحد) — العمولة تُقسَّم بينهم بالتساوي
   isOffline?: boolean;
   is_deleted?: boolean;
   deleted_at?: string | null;
@@ -108,6 +175,38 @@ export interface Order {
   coupon_code?: string | null;
   discount_amount?: number;
   car_id?: string;
+  exchange_data?: any; // بيانات الاستبدال: { before, after, oldTotal, newTotal, diff, method, date }
+}
+
+// فاتورة معلقة / محجوزة: تحجز الكمية من المخزون دون تسجيل بيع، ويمكن لاحقاً
+// تأكيد البيع (تُحمَّل في الكاشير وتُكمَّل) أو إرجاعها للمخزون. تُرجَّع تلقائياً
+// للمخزون بعد أسبوع إن لم يُتَّخذ إجراء.
+export interface HeldInvoiceItem {
+  id: string;
+  name: string;
+  barcode?: string;
+  quantity: number;
+  sale_price: number;
+  purchase_price?: number;
+  average_purchase_price?: number;
+  unit?: string;
+  category_id?: string;
+}
+
+export interface HeldInvoice {
+  id: string;
+  customer_name?: string | null;
+  customer_phone?: string | null;
+  customer_custom_id?: string | null;
+  items: HeldInvoiceItem[];
+  total: number;
+  invoice_type: 'retail' | 'half' | 'wholesale';
+  salesperson_id?: string | null;
+  salesperson_name?: string | null;
+  cashier_name?: string | null;
+  notes?: string | null;
+  created_at: string;
+  expires_at: string;
 }
 
 export interface Expense {
@@ -118,8 +217,10 @@ export interface Expense {
   paid_visa: number;
   paid_wallet: number;
   paid_instapay: number;
+  paid_method5?: number;
+  paid_method6?: number;
   note: string;
-  payment_method: 'cash' | 'visa' | 'wallet' | 'instapay';
+  payment_method: 'cash' | 'visa' | 'wallet' | 'instapay' | 'method5' | 'method6';
   date: string;
   car_id?: string;
 }
@@ -202,6 +303,11 @@ export interface StoreSettings {
   whatsappCountryCode: string;
   initial_balance: number;
   locationUrl?: string;
+  cashierPermissions?: Record<string, boolean>; // صلاحيات الكاشير (إظهار/إخفاء مميزات)
+  paymentLabels?: Record<string, string>; // تسميات وسائل الدفع (كاش/فيزا/محفظة/انستا/طريقة5/طريقة6)
+  paymentMethodsEnabled?: Record<string, boolean>; // تفعيل طرق الدفع الإضافية (method5/method6)
+  showInvoiceProfit?: boolean; // إظهار ربح الفاتورة في شاشة الكاشير
+  allowCashierEmployeeAdvance?: boolean; // السماح للكاشير بصرف سلف للموظفين (افتراضياً مغلق)
 }
 
 export interface Employee {
@@ -215,6 +321,8 @@ export interface Employee {
   hire_date: string;
   is_active: boolean;
   created_at: string;
+  cashier_id?: string; // ربط الموظف بحساب الكاشير
+  commission_rate?: number; // نسبة عمولة المبيعات % (للمحاسبين)
 }
 
 export interface EmployeeTransaction {
@@ -222,11 +330,13 @@ export interface EmployeeTransaction {
   employee_id: string;
   amount: number;
   type: 'salary' | 'advance' | 'incentive';
-  payment_method: 'cash' | 'visa' | 'wallet' | 'instapay';
+  payment_method: 'cash' | 'visa' | 'wallet' | 'instapay' | 'method5' | 'method6';
   paid_cash: number;
   paid_visa: number;
   paid_wallet: number;
   paid_instapay: number;
+  paid_method5?: number;
+  paid_method6?: number;
   month: string;
   deductions: number;
   note: string;
@@ -276,6 +386,15 @@ export interface CashierNote {
   created_at: string;
 }
 
+export interface AdminUser {
+  id: string;
+  name: string;
+  password?: string;
+  email?: string;
+  permissions: string[]; // مسارات الصفحات المسموح بها
+  created_at?: string;
+}
+
 // ─── Store Interface ──────────────────────────────────────────
 interface CashierStore {
   storeSettings: StoreSettings;
@@ -284,7 +403,11 @@ interface CashierStore {
   customers: Customer[];
   suppliers: Supplier[];
   cashiers: Cashier[];
+  materials: Material[];
+  productionOrders: ProductionOrder[];
   cart: OrderItem[];
+  invoiceType: 'retail' | 'half' | 'wholesale';
+  salespeople: { id: string; name: string }[]; // الكباتن المختارون للفاتورة الحالية (متعدد)
   orders: Order[];
   expenses: Expense[];
   financingAccounts: FinancingAccount[];
@@ -306,18 +429,19 @@ interface CashierStore {
   maintenanceAppointments: MaintenanceAppointment[];
 
   // Data loading
-  loadAll: () => Promise<void>;
+  loadAll: (silent?: boolean) => Promise<void>;
   loadSettingsOnly: () => Promise<void>;
   loadProductsOnly: () => Promise<void>;
-  adjustStock: (items: { product_id: string; counted_qty: number; location?: 'all' | 'display' | 'warehouse' }[], note?: string) => Promise<number>;
 
   // Cart
   addToCart: (product: Product) => void;
   addToCartQty: (product: Product, quantity: number) => void;
-  removeFromCart: (productId: string, unit: string) => void;
-  updateQuantity: (productId: string, quantity: number, unit: string) => void;
-  updatePrice: (productId: string, price: number, unit: string) => void;
+  removeFromCart: (productId: string) => void;
+  updateQuantity: (productId: string, quantity: number) => void;
+  updatePrice: (productId: string, price: number) => void;
   clearCart: () => void;
+  setInvoiceType: (t: 'retail' | 'half' | 'wholesale') => void;
+  setSalespeople: (sp: { id: string; name: string }[]) => void;
 
   // Operations
   checkout: (
@@ -326,7 +450,7 @@ interface CashierStore {
     paidAmount?: number, 
     type?: 'sale' | 'payment' | 'previous_debt', 
     paymentMethod?: string,
-    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number },
+    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number },
     cashierName?: string,
     notes?: string,
     couponCode?: string,
@@ -337,24 +461,41 @@ interface CashierStore {
     invoiceId: string, 
     customerId: string, 
     amount: number, 
-    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number },
+    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number },
     paymentMethod?: string,
     discount?: number
   ) => Promise<string | null | void>;
   processReturn: (orderId: string, returns: { productId: string, returnQty: number, refundAmount: number, debtDeduction?: number }[], refundMethod?: string) => Promise<boolean>;
   deleteOrder: (orderId: string, reason?: string) => Promise<boolean>;
   editOrder: (orderId: string, updatedData: Partial<Order>, updatedItems: OrderItem[], reason: string) => Promise<boolean>;
+  markOrderExchanged: (orderId: string, exchangeData: any) => Promise<boolean>;
 
+  // Held / reserved invoices (فواتير معلقة)
+  heldInvoices: HeldInvoice[];
+  loadHeldInvoices: () => Promise<void>;
+  holdInvoice: (data: {
+    customerName?: string;
+    customerPhone?: string;
+    customerCustomId?: string;
+    notes?: string;
+  }) => Promise<boolean>;
+  confirmHeldInvoice: (id: string) => Promise<HeldInvoice | null>;
+  returnHeldInvoice: (id: string) => Promise<boolean>;
+  sweepExpiredHeldInvoices: () => Promise<void>;
 
   // Admin
   loadAnalyticsData: (startDate?: string, endDate?: string) => Promise<Order[]>;
   updateSettings: (settings: Partial<StoreSettings>) => Promise<void>;
   addProduct: (product: Omit<Product, 'id'>) => Promise<Product | undefined>;
   updateProduct: (id: string, product: Partial<Product>) => Promise<void>;
+  adjustStock: (items: { product_id: string; counted_qty: number }[], note?: string) => Promise<number>;
   deleteProduct: (id: string) => Promise<void>;
   
   // Expenses
   addExpense: (expense: Omit<Expense, 'id' | 'date'>) => Promise<void>;
+  managerWithdraw: (managerName: string, split: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number }) => Promise<boolean>;
+  recordPartnerTransaction: (tx: { partner_id: string; partner_name: string; type: 'deposit' | 'withdraw'; amount: number; treasury: 'shop' | 'main'; method: string; note?: string }) => Promise<boolean>;
+  savingsTransfer: (split: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number }, direction: 'in' | 'out', source: string, note?: string) => Promise<boolean>;
   updateExpense: (id: string, expense: Partial<Expense>) => Promise<void>;
   deleteExpense: (id: string) => Promise<void>;
 
@@ -381,6 +522,26 @@ interface CashierStore {
   addCashier: (cashier: Omit<Cashier, 'id' | 'created_at'>) => Promise<void>;
   updateCashier: (id: string, cashier: Partial<Cashier>) => Promise<void>;
   deleteCashier: (id: string) => Promise<void>;
+
+  // Manufacturing
+  loadManufacturing: () => Promise<void>;
+  addMaterial: (m: Omit<Material, 'id' | 'created_at'>, payment?: { supplierId?: string; split?: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number } }) => Promise<void>;
+  updateMaterial: (id: string, m: Partial<Material>) => Promise<void>;
+  deleteMaterial: (id: string) => Promise<void>;
+  transferFromFactory: (productId: string, toDisplay: number, toWarehouse: number) => Promise<boolean>;
+  addProductionOrder: (input: {
+    product_name: string;
+    color?: string;
+    code?: string;
+    quantity: number;
+    sale_price: number;
+    extra_costs: number;
+    display_quantity?: number;
+    warehouse_quantity?: number;
+    extra_costs_split?: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number };
+    notes?: string;
+    materials: { material_id: string; quantity: number }[];
+  }) => Promise<boolean>;
   deleteCashierNote: (id: string) => Promise<void>;
 
   // Coupons
@@ -416,16 +577,16 @@ interface CashierStore {
   addPurchaseInvoice: (
     invoice: Omit<PurchaseInvoice, 'id' | 'created_at' | 'items' | 'paid_cash' | 'paid_visa' | 'paid_wallet' | 'paid_instapay'>, 
     items: PurchaseItem[],
-    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number }
+    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number }
   ) => Promise<void>;
   updatePurchaseInvoice: (
     invoiceId: string,
     invoice: Omit<PurchaseInvoice, 'id' | 'created_at' | 'items' | 'paid_cash' | 'paid_visa' | 'paid_wallet' | 'paid_instapay'>, 
       items: PurchaseItem[],
-    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number }
+    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number }
   ) => Promise<void>;
   deletePurchaseInvoice: (id: string) => Promise<void>;
-  paySupplierDebt: (supplierId: string, amount: number, splitPayments?: { cash: number; visa: number; wallet: number; instapay: number }) => Promise<void>;
+  paySupplierDebt: (supplierId: string, amount: number, splitPayments?: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number }) => Promise<void>;
 
   // Car Maintenance
   loadCarSubscriptions: () => Promise<void>;
@@ -440,7 +601,7 @@ interface CashierStore {
     appointmentId: string, 
     report: string, 
     items: { type: 'part' | 'labor', name: string, costPrice: number, salePrice: number }[],
-    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number },
+    splitPayments?: { cash: number; visa: number; wallet: number; instapay: number; method5?: number; method6?: number },
     paymentMethod?: 'cash' | 'visa' | 'wallet' | 'instapay'
   ) => Promise<void>;
   completeAppointmentWithRegisteredTransactions: (appointmentId: string, cost: number, report: string) => Promise<void>;
@@ -461,10 +622,19 @@ interface CashierStore {
   // Auth
   isAdminAuthenticated: boolean;
   isPOSAuthenticated: boolean;
+  adminPermissions: string[] | null; // null = صلاحيات كاملة (المدير العام)
   login: (pin: string) => Promise<boolean>;
+  loginAdminUser: (user: { email?: string; permissions?: string[] }, password: string) => Promise<boolean>;
   logout: () => Promise<void>;
   loginPOS: (name: string, password?: string) => Promise<boolean>;
   logoutPOS: () => Promise<void>;
+
+  // Admin users (لوحة التحكم)
+  adminUsers: AdminUser[];
+  loadAdminUsers: () => Promise<void>;
+  addAdminUser: (u: { name: string; password: string; permissions: string[] }) => Promise<void>;
+  updateAdminUser: (id: string, u: Partial<AdminUser> & { password?: string }) => Promise<void>;
+  deleteAdminUser: (id: string) => Promise<void>;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -481,6 +651,11 @@ function mapSettings(row: Record<string, unknown>): StoreSettings {
     whatsappCountryCode: (row.whatsapp_country_code as string) ?? '2',
     initial_balance: (row.initial_balance as number) ?? 0,
     locationUrl: (row.location_url as string) ?? '',
+    cashierPermissions: (row.cashier_permissions as Record<string, boolean>) ?? undefined,
+    paymentLabels: (row.payment_labels as Record<string, string>) ?? undefined,
+    paymentMethodsEnabled: (row.payment_methods_enabled as Record<string, boolean>) ?? undefined,
+    showInvoiceProfit: (row.show_invoice_profit as boolean) ?? true,
+    allowCashierEmployeeAdvance: (row.allow_cashier_employee_advance as boolean) ?? false,
   };
 }
 
@@ -568,23 +743,28 @@ const getSplits = (split: any, method: string, amount: number) => {
   const visa = Number(split?.visa) || 0;
   const wallet = Number(split?.wallet) || 0;
   const instapay = Number(split?.instapay) || 0;
-  if (cash + visa + wallet + instapay > 0) {
-    return { cash, visa, wallet, instapay };
+  const method5 = Number(split?.method5) || 0;
+  const method6 = Number(split?.method6) || 0;
+  if (cash + visa + wallet + instapay + method5 + method6 > 0) {
+    return { cash, visa, wallet, instapay, method5, method6 };
   }
   return {
     cash: method === 'cash' ? amount : 0,
     visa: method === 'visa' ? amount : 0,
     wallet: method === 'wallet' ? amount : 0,
-    instapay: method === 'instapay' ? amount : 0
+    instapay: method === 'instapay' ? amount : 0,
+    method5: method === 'method5' ? amount : 0,
+    method6: method === 'method6' ? amount : 0,
   };
 };
+
 
 // ─── Store ───────────────────────────────────────────────────
 export const useStore = create<CashierStore>((set, get) => ({
   storeSettings: {
-    name: 'محل اللحوم الطازجة',
+    name: 'ADRIA',
     currency: 'ج.م',
-    logo: 'https://cdn-icons-png.flaticon.com/512/3143/3143641.png',
+    logo: '',
     taxRate: 0,
     themeColor: '#4f46e5',
     address: '',
@@ -593,13 +773,19 @@ export const useStore = create<CashierStore>((set, get) => ({
     whatsappCountryCode: '2',
     initial_balance: 0,
     locationUrl: '',
+    allowCashierEmployeeAdvance: false,
   },
   products: [],
   categories: [],
   customers: [],
   suppliers: [],
   cashiers: [],
+  materials: [],
+  productionOrders: [],
   cart: [],
+  invoiceType: 'retail',
+  salespeople: [],
+  setSalespeople: (sp) => set({ salespeople: sp }),
   orders: [],
   expenses: [],
   financingAccounts: [],
@@ -614,6 +800,7 @@ export const useStore = create<CashierStore>((set, get) => ({
   coupons: [],
   carSubscriptions: [],
   maintenanceAppointments: [],
+  heldInvoices: [],
   invoiceCounter: 1,
   activeInvoiceId: '1',
   isLoading: false,
@@ -624,6 +811,8 @@ export const useStore = create<CashierStore>((set, get) => ({
   isSyncing: false,
   activeCashier: null,
   isAdminAuthenticated: !!sessionStorage.getItem('cashier_admin_auth'),
+  adminPermissions: (() => { try { const v = sessionStorage.getItem('admin_permissions'); return v ? JSON.parse(v) : null; } catch { return null; } })(),
+  adminUsers: [],
   isPOSAuthenticated: !!sessionStorage.getItem('cashier_pos_auth'),
 
   // Admin login: authenticates against Supabase Auth using a fixed admin
@@ -636,43 +825,70 @@ export const useStore = create<CashierStore>((set, get) => ({
       console.error('VITE_ADMIN_EMAIL is not configured. Run the security setup (SECURITY_SETUP.md).');
       return false;
     }
-    
-    // Hardcoded fallback for the admin email
-    if (adminEmail === 'alialawady2006@gmail.com' && pin === '123456') {
-      sessionStorage.setItem('cashier_admin_auth', 'true');
-      sessionStorage.setItem('cashier_pos_auth', 'true');
-      sessionStorage.setItem('active_cashier_name', 'مدير النظام');
-      set({
-        isAdminAuthenticated: true,
-        isPOSAuthenticated: true,
-        activeCashier: { id: 'master', name: 'مدير النظام', pin: '123456', phone: '', photo_url: '', created_at: '' },
-      });
-      await get().loadAll();
-      return true;
-    }
-
+    // امسح أي جلسة قديمة/تالفة محفوظة محليًا قبل تسجيل الدخول، حتى لا تفشل أول
+    // محاولة وتضطر لإدخال كلمة المرور مرتين، ولضمان التحقق الفعلي من كلمة المرور.
+    await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
     const { error } = await supabase.auth.signInWithPassword({ email: adminEmail, password: pin });
     if (error) return false;
     sessionStorage.setItem('cashier_admin_auth', 'true');
-    sessionStorage.setItem('cashier_pos_auth', 'true');
-    sessionStorage.setItem('active_cashier_name', 'مدير النظام');
-    set({
-      isAdminAuthenticated: true,
-      isPOSAuthenticated: true,
-      activeCashier: { id: 'master', name: 'مدير النظام', pin: '123456', phone: '', photo_url: '', created_at: '' },
-    });
+    sessionStorage.removeItem('admin_permissions'); // المدير العام = صلاحيات كاملة
+    set({ isAdminAuthenticated: true, adminPermissions: null });
     // Reload data now that we have an authenticated session (under RLS, the
     // initial anon load returns nothing).
-    await get().loadAll();
+    await get().loadAll(true);
     return true;
+  },
+
+  // دخول مستخدم لوحة تحكم بصلاحيات محددة
+  loginAdminUser: async (user, password) => {
+    if (!user?.email) return false;
+    // امسح أي جلسة قديمة/تالفة محفوظة محليًا قبل تسجيل الدخول (يمنع مشكلة إدخال
+    // كلمة المرور مرتين، ويضمن التحقق الفعلي من كلمة المرور).
+    await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    const { error } = await supabase.auth.signInWithPassword({ email: user.email, password });
+    if (error) return false;
+    const perms = Array.isArray(user.permissions) ? user.permissions : [];
+    sessionStorage.setItem('cashier_admin_auth', 'true');
+    sessionStorage.setItem('admin_permissions', JSON.stringify(perms));
+    set({ isAdminAuthenticated: true, adminPermissions: perms });
+    await get().loadAll(true);
+    return true;
+  },
+
+  loadAdminUsers: async () => {
+    const { data } = await supabase.from('admin_users').select('*').order('name');
+    if (data) set({ adminUsers: (data as unknown as AdminUser[]) });
+  },
+
+  addAdminUser: async ({ name, password, permissions }) => {
+    const { data, error } = await supabase.from('admin_users').insert({ name, password, permissions }).select().single();
+    if (error) { alert('تعذّر حفظ المستخدم: ' + error.message); return; }
+    const row = data as unknown as AdminUser;
+    const r = await provisionCashierAuth(row.id, password, 'admin_users');
+    if (r.ok) row.email = `admin-${row.id}@admin.local`;
+    else alert('تم حفظ المستخدم، لكن تعذّر إنشاء حساب الدخول:\n' + (r.error || '') + '\nتأكد من SUPABASE_SERVICE_ROLE_KEY على Vercel ثم عدّل الباسورد.');
+    set((s) => ({ adminUsers: [row, ...s.adminUsers] }));
+  },
+
+  updateAdminUser: async (id, u) => {
+    await supabase.from('admin_users').update({ name: u.name, password: u.password, permissions: u.permissions }).eq('id', id);
+    if (u.password) {
+      const r = await provisionCashierAuth(id, u.password, 'admin_users');
+      if (!r.ok) alert('تم التعديل، لكن تعذّر تحديث حساب الدخول: ' + (r.error || ''));
+    }
+    set((s) => ({ adminUsers: s.adminUsers.map((x) => (x.id === id ? { ...x, ...u } : x)) }));
+  },
+
+  deleteAdminUser: async (id) => {
+    await supabase.from('admin_users').delete().eq('id', id);
+    set((s) => ({ adminUsers: s.adminUsers.filter((x) => x.id !== id) }));
   },
 
   logout: async () => {
     await supabase.auth.signOut();
     sessionStorage.removeItem('cashier_admin_auth');
-    sessionStorage.removeItem('cashier_pos_auth');
-    sessionStorage.removeItem('active_cashier_name');
-    set({ isAdminAuthenticated: false, isPOSAuthenticated: false, activeCashier: null });
+    sessionStorage.removeItem('admin_permissions');
+    set({ isAdminAuthenticated: false, adminPermissions: null });
   },
 
   // Cashier login: each cashier is a Supabase Auth user (email set by the
@@ -682,13 +898,16 @@ export const useStore = create<CashierStore>((set, get) => ({
     const { cashiers } = get();
     const cashier = cashiers.find(c => c.name === name);
     if (!cashier || !cashier.email) return false;
+    // امسح أي جلسة قديمة/تالفة محفوظة محليًا قبل تسجيل الدخول (يمنع مشكلة إدخال
+    // كلمة المرور مرتين، ويضمن التحقق الفعلي من كلمة المرور الجديدة بعد تغييرها).
+    await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
     const { error } = await supabase.auth.signInWithPassword({ email: cashier.email, password: password ?? '' });
     if (error) return false;
     sessionStorage.setItem('cashier_pos_auth', 'true');
     sessionStorage.setItem('active_cashier_name', cashier.name);
     set({ isPOSAuthenticated: true, activeCashier: cashier });
     // Reload data now that we have an authenticated session.
-    await get().loadAll();
+    await get().loadAll(true);
     return true;
   },
 
@@ -713,15 +932,17 @@ export const useStore = create<CashierStore>((set, get) => ({
 
   logoutPOS: async () => {
     await supabase.auth.signOut();
-    sessionStorage.removeItem('cashier_admin_auth');
     sessionStorage.removeItem('cashier_pos_auth');
     sessionStorage.removeItem('active_cashier_name');
-    set({ isAdminAuthenticated: false, isPOSAuthenticated: false, activeCashier: null });
+    set({ isPOSAuthenticated: false, activeCashier: null });
   },
 
   // ── Load all data from Supabase ────────────────────────────
-  loadAll: async () => {
-    set({ isLoading: true, dbError: null });
+  loadAll: async (silent = false) => {
+    // silent = reload data in the background without toggling the full-screen
+    // loader (which would unmount the Router and drop a pending navigate, e.g.
+    // right after login). Used by login()/loginPOS().
+    if (!silent) set({ isLoading: true, dbError: null });
     try {
       const [settingsRes, categoriesRes, productsRes, customersRes, ordersRes, counterRes, cashiersRes, employeesRes, employeeTransactionsRes, employeeLeavesRes] =
         await Promise.all([
@@ -780,12 +1001,18 @@ export const useStore = create<CashierStore>((set, get) => ({
           paid_visa: (o.paid_visa as number) ?? 0,
           paid_wallet: (o.paid_wallet as number) ?? 0,
           paid_instapay: (o.paid_instapay as number) ?? 0,
+          paid_method5: (o.paid_method5 as number) ?? 0,
+          paid_method6: (o.paid_method6 as number) ?? 0,
           type: (o.type as string) as 'sale' | 'payment' ?? 'sale',
           payment_method: (o.payment_method as any) ?? 'cash',
           refund_method: (o.refund_method as string) ?? undefined,
           date: o.created_at as string,
           items,
           cashier_name: (o.cashier_name as string) ?? undefined,
+          salesperson_id: (o.salesperson_id as string) ?? undefined,
+          salesperson_name: (o.salesperson_name as string) ?? undefined,
+          salespeople: (o.salespeople as any) ?? [],
+          exchange_data: (o.exchange_data as any) ?? undefined,
           is_deleted: Boolean(o.is_deleted),
           deleted_at: (o.deleted_at as string) ?? null,
           deletion_reason: (o.deletion_reason as string) ?? null,
@@ -875,6 +1102,9 @@ export const useStore = create<CashierStore>((set, get) => ({
       get().loadProductSuggestions();
       get().loadCashierNotes();
       get().loadCoupons();
+      get().loadHeldInvoices();
+      // إرجاع الفواتير المعلقة المنتهية (أكثر من أسبوع) للمخزون تلقائياً.
+      get().sweepExpiredHeldInvoices();
 
       // Setup Realtime subscriptions
       get().setupRealtime();
@@ -1012,6 +1242,9 @@ export const useStore = create<CashierStore>((set, get) => ({
           customer_id: customerId,
           payment_method: offlineOrder.payment_method,
           cashier_name: offlineOrder.cashier_name,
+          salesperson_id: offlineOrder.salesperson_id || null,
+          salesperson_name: offlineOrder.salesperson_name || null,
+          salespeople: offlineOrder.salespeople || [],
           coupon_code: offlineOrder.coupon_code || null,
           discount_amount: offlineOrder.discount_amount || 0,
           created_at: offlineOrder.date
@@ -1029,7 +1262,6 @@ export const useStore = create<CashierStore>((set, get) => ({
           refunded_amount: item.refunded_amount || 0,
           sale_price: item.sale_price,
           purchase_price: item.average_purchase_price || item.purchase_price || 0,
-          unit: item.unit || 'قطعة',
         }));
         const { error: itemsError } = await supabase.from('order_items').insert(itemsPayload);
         if (itemsError) {
@@ -1038,14 +1270,10 @@ export const useStore = create<CashierStore>((set, get) => ({
         }
 
         for (const item of offlineOrder.items) {
-          const { data: prodData } = await supabase.from('products').select('stock_quantity, has_strips, strips_per_box').eq('id', item.id).single();
-          const currentStock = (prodData as any)?.stock_quantity ?? 0;
+          const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
+          const currentStock = prodData?.stock_quantity ?? 0;
           const netQty = item.quantity - (item.returned_quantity || 0);
-          const stripsPerBox = (prodData as any)?.strips_per_box || 1;
-          const deductQty = ((prodData as any)?.has_strips && item.unit === 'شريط')
-            ? netQty / stripsPerBox
-            : netQty;
-          await supabase.from('products').update({ stock_quantity: Math.max(0, currentStock - deductQty) }).eq('id', item.id);
+          await supabase.from('products').update({ stock_quantity: Math.max(0, currentStock - netQty) }).eq('id', item.id);
         }
 
         set((s) => ({
@@ -1071,65 +1299,66 @@ export const useStore = create<CashierStore>((set, get) => ({
   // ── Cart ───────────────────────────────────────────────────
   addToCart: (product) =>
     set((state) => {
-      const stripsPerBox = product.strips_per_box || 1;
-      const maxQty = (product.has_strips && product.unit === 'شريط')
-        ? product.stock_quantity * stripsPerBox
-        : product.stock_quantity;
-      if (maxQty <= 0) return state;
-      const step = unitStep(product.unit);
-      const existing = state.cart.find((i) => i.id === product.id && i.unit === product.unit);
+      if (product.stock_quantity <= 0) return state;
+      const step = unitStep(product.unit); // 1 للقطعة، 0.25 للوحدات الكسرية
+      const existing = state.cart.find((i) => i.id === product.id);
       if (existing) {
-        if (existing.quantity >= maxQty) return state;
-        const next = Math.min(existing.quantity + step, maxQty);
-        return { cart: state.cart.map((i) => (i.id === product.id && i.unit === product.unit ? { ...i, quantity: next } : i)) };
+        if (existing.quantity >= product.stock_quantity) return state;
+        const next = Math.min(existing.quantity + step, product.stock_quantity);
+        return { cart: state.cart.map((i) => (i.id === product.id ? { ...i, quantity: next } : i)) };
       }
-      const first = Math.min(step, maxQty);
-      return { cart: [...state.cart, { ...product, quantity: first, returned_quantity: 0 }] };
+      const first = Math.min(step, product.stock_quantity);
+      const price = priceForType(product, state.invoiceType);
+      return { cart: [...state.cart, { ...product, sale_price: price, quantity: first, returned_quantity: 0 }] };
     }),
 
   // إضافة منتج للسلة بكمية محددة (تُستخدم لإدخال الوزن من شاشة الكاشير)
   addToCartQty: (product, quantity) =>
     set((state) => {
-      const stripsPerBox = product.strips_per_box || 1;
-      const maxQty = (product.has_strips && product.unit === 'شريط')
-        ? product.stock_quantity * stripsPerBox
-        : product.stock_quantity;
-      if (maxQty <= 0 || quantity <= 0) return state;
+      if (product.stock_quantity <= 0 || quantity <= 0) return state;
       const min = unitMinQty(product.unit);
-      const existing = state.cart.find((i) => i.id === product.id && i.unit === product.unit);
+      const existing = state.cart.find((i) => i.id === product.id);
       if (existing) {
-        const next = Math.max(min, Math.min(existing.quantity + quantity, maxQty));
-        return { cart: state.cart.map((i) => (i.id === product.id && i.unit === product.unit ? { ...i, quantity: next } : i)) };
+        const next = Math.max(min, Math.min(existing.quantity + quantity, product.stock_quantity));
+        return { cart: state.cart.map((i) => (i.id === product.id ? { ...i, quantity: next } : i)) };
       }
-      const qty = Math.max(min, Math.min(quantity, maxQty));
-      return { cart: [...state.cart, { ...product, quantity: qty, returned_quantity: 0 }] };
+      const qty = Math.max(min, Math.min(quantity, product.stock_quantity));
+      const price = priceForType(product, state.invoiceType);
+      return { cart: [...state.cart, { ...product, sale_price: price, quantity: qty, returned_quantity: 0 }] };
     }),
 
-  removeFromCart: (productId, unit) => set((state) => ({ cart: state.cart.filter((i) => !(i.id === productId && i.unit === unit)) })),
+  removeFromCart: (productId) => set((state) => ({ cart: state.cart.filter((i) => i.id !== productId) })),
 
-  updateQuantity: (productId: string, quantity: number, unit: string) =>
+  updateQuantity: (productId: string, quantity: number) =>
     set((state) => {
       const product = state.products.find((p) => p.id === productId);
       if (!product) return state;
-      const stripsPerBox = product.strips_per_box || 1;
-      const maxQty = (product.has_strips && unit === 'شريط')
-        ? product.stock_quantity * stripsPerBox
-        : product.stock_quantity;
-      const validQty = Math.max(unitMinQty(unit), Math.min(quantity, maxQty));
-      return { cart: state.cart.map((i) => (i.id === productId && i.unit === unit ? { ...i, quantity: validQty } : i)) };
+      const validQty = Math.max(unitMinQty(product.unit), Math.min(quantity, product.stock_quantity));
+      return { cart: state.cart.map((i) => (i.id === productId ? { ...i, quantity: validQty } : i)) };
     }),
 
-  updatePrice: (productId, price, unit) =>
+  updatePrice: (productId, price) =>
     set((state) => ({
-      cart: state.cart.map((i) => (i.id === productId && i.unit === unit ? { ...i, sale_price: price } : i))
+      cart: state.cart.map((i) => (i.id === productId ? { ...i, sale_price: price } : i))
     })),
 
   clearCart: () => set({ cart: [] }),
+
+  // Switch pricing tier; re-price items already in the cart.
+  setInvoiceType: (t) => set((state) => ({
+    invoiceType: t,
+    cart: state.cart.map((i) => {
+      const prod = state.products.find((p) => p.id === i.id);
+      return prod ? { ...i, sale_price: priceForType(prod, t) } : i;
+    }),
+  })),
 
   // ── Checkout ───────────────────────────────────────────────
   checkout: async (total, customerDetails, paidAmount = total, type = 'sale', paymentMethod = 'cash', splitPayments, cashierName, notes, couponCode, discountAmount, carId) => {
     const state = get();
     const finalCashierName = cashierName || state.activeCashier?.name || 'مدير النظام';
+    const salespeople = state.salespeople || [];
+    const sp = salespeople[0] || null; // للتوافق مع الأعمدة المفردة القديمة (أول كابتن)
     if (state.cart.length === 0 && type !== 'payment' && type !== 'previous_debt') return state.activeInvoiceId;
 
     const savedPaidAmount = type === 'payment' ? paidAmount : Math.min(total, paidAmount);
@@ -1175,11 +1404,16 @@ export const useStore = create<CashierStore>((set, get) => ({
         paid_visa: splits.visa,
         paid_wallet: splits.wallet,
         paid_instapay: splits.instapay,
+        paid_method5: splits.method5 || 0,
+        paid_method6: splits.method6 || 0,
         type,
         payment_method: paymentMethod as any,
         date: new Date().toISOString(),
         customer: finalCustomer,
         cashier_name: finalCashierName,
+        salesperson_id: sp?.id || undefined,
+        salesperson_name: sp?.name || undefined,
+        salespeople,
         notes: notes || null,
         coupon_code: couponCode || null,
         discount_amount: discountAmount || 0,
@@ -1203,6 +1437,8 @@ export const useStore = create<CashierStore>((set, get) => ({
       set({
         orders: [newOfflineOrder, ...state.orders],
         cart: [],
+        invoiceType: 'retail',
+        salespeople: [],
         products: updatedProducts,
         customers: updatedCustomers,
         offlineQueue: updatedQueue
@@ -1297,10 +1533,15 @@ export const useStore = create<CashierStore>((set, get) => ({
         paid_visa: splits.visa,
         paid_wallet: splits.wallet,
         paid_instapay: splits.instapay,
+        paid_method5: splits.method5 || 0,
+        paid_method6: splits.method6 || 0,
         type,
         customer_id: customerId,
         payment_method: paymentMethod,
         cashier_name: finalCashierName,
+        salesperson_id: sp?.id || null,
+        salesperson_name: sp?.name || null,
+        salespeople,
         notes: notes || null,
         coupon_code: couponCode || null,
         discount_amount: discountAmount || 0,
@@ -1324,7 +1565,6 @@ export const useStore = create<CashierStore>((set, get) => ({
         returned_quantity: 0,
         sale_price: item.sale_price,
         purchase_price: item.average_purchase_price || item.purchase_price,
-        unit: item.unit
       }));
       const { error: itemsError } = await supabase.from('order_items').insert(itemsPayload);
       if (itemsError) {
@@ -1333,13 +1573,7 @@ export const useStore = create<CashierStore>((set, get) => ({
 
       // Update stock
       for (const item of state.cart) {
-        const product = state.products.find((p) => p.id === item.id);
-        const currentStock = product?.stock_quantity ?? 0;
-        const stripsPerBox = item.strips_per_box || 1;
-        const deductQty = (item.has_strips && item.unit === 'شريط')
-          ? item.quantity / stripsPerBox
-          : item.quantity;
-        const newQty = currentStock - deductQty;
+        const newQty = (state.products.find((p) => p.id === item.id)?.stock_quantity ?? 0) - item.quantity;
         await supabase.from('products').update({ stock_quantity: Math.max(0, newQty) }).eq('id', item.id);
       }
 
@@ -1353,26 +1587,23 @@ export const useStore = create<CashierStore>((set, get) => ({
         paid_visa: splits.visa,
         paid_wallet: splits.wallet,
         paid_instapay: splits.instapay,
+        paid_method5: splits.method5 || 0,
+        paid_method6: splits.method6 || 0,
         type,
         payment_method: paymentMethod as any,
         date: new Date().toISOString(),
         customer: finalCustomer,
         cashier_name: finalCashierName,
+        salesperson_id: sp?.id,
+        salesperson_name: sp?.name,
+        salespeople,
         notes: notes || null,
         car_id: carId || undefined
       };
 
       const updatedProducts = state.products.map((p) => {
-        const cartItemsForProd = state.cart.filter((c) => c.id === p.id);
-        if (cartItemsForProd.length === 0) return p;
-        const totalDeduct = cartItemsForProd.reduce((sum, item) => {
-          const stripsPerBox = item.strips_per_box || 1;
-          const deduct = (item.has_strips && item.unit === 'شريط')
-            ? item.quantity / stripsPerBox
-            : item.quantity;
-          return sum + deduct;
-        }, 0);
-        return { ...p, stock_quantity: Math.max(0, p.stock_quantity - totalDeduct) };
+        const cartItem = state.cart.find((c) => c.id === p.id);
+        return cartItem ? { ...p, stock_quantity: Math.max(0, p.stock_quantity - cartItem.quantity) } : p;
       });
 
       const updatedCustomers = finalCustomer && !state.customers.find((c) => c.id === finalCustomer!.id)
@@ -1382,6 +1613,8 @@ export const useStore = create<CashierStore>((set, get) => ({
       set({
         orders: [newOrder, ...state.orders],
         cart: [],
+        invoiceType: 'retail',
+        salespeople: [],
         products: updatedProducts,
         customers: updatedCustomers,
         invoiceCounter: nextCounter,
@@ -1392,6 +1625,7 @@ export const useStore = create<CashierStore>((set, get) => ({
       sendTelegramAlert({
         type: type === 'payment' ? 'payment' : 'sale',
         actor: finalCashierName,
+        salesperson: salespeople.map((s) => s.name).join('، ') || undefined,
         currency: state.storeSettings.currency,
         invoiceId,
         invoiceUrl: getPublicInvoiceUrl(invoiceId),
@@ -1412,6 +1646,228 @@ export const useStore = create<CashierStore>((set, get) => ({
     } catch (err) {
       console.warn("Network offline or Supabase connection failed. Falling back to offline checkout:", err);
       return executeOfflineCheckout();
+    }
+  },
+
+  // ── Held / reserved invoices (فواتير معلقة) ─────────────────
+  loadHeldInvoices: async () => {
+    try {
+      const { data, error } = await supabase
+        .from('held_invoices')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (!error && data) {
+        set({ heldInvoices: (data as any[]).map((h) => ({ ...h, items: Array.isArray(h.items) ? h.items : [] })) as HeldInvoice[] });
+      }
+    } catch (e) {
+      console.error('Held invoices table might not exist yet:', e);
+    }
+  },
+
+  // Saves the current cart as a held invoice and RESERVES the stock (deducts it
+  // from products.stock_quantity, like a real sale) so the quantity can't be
+  // sold twice. No invoice number is consumed until the sale is confirmed.
+  holdInvoice: async ({ customerName, customerPhone, customerCustomId, notes } = {}) => {
+    const state = get();
+    if (state.cart.length === 0) return false;
+    try {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        alert('حفظ الفواتير المعلقة غير متاح بدون اتصال بالإنترنت.');
+        return false;
+      }
+      const sp = (state.salespeople || [])[0] || null; // الفواتير المعلقة تحفظ الكابتن الأساسي فقط
+      const total = state.cart.reduce((sum, i) => sum + i.sale_price * i.quantity, 0);
+      const items: HeldInvoiceItem[] = state.cart.map((i) => ({
+        id: i.id,
+        name: i.name,
+        barcode: i.barcode,
+        quantity: i.quantity,
+        sale_price: i.sale_price,
+        purchase_price: i.purchase_price,
+        average_purchase_price: i.average_purchase_price,
+        unit: i.unit,
+        category_id: i.category_id,
+      }));
+
+      const { data, error } = await supabase
+        .from('held_invoices')
+        .insert({
+          customer_name: customerName?.trim() || null,
+          customer_phone: customerPhone?.trim() || null,
+          customer_custom_id: customerCustomId?.trim() || null,
+          items,
+          total,
+          invoice_type: state.invoiceType,
+          salesperson_id: sp?.id || null,
+          salesperson_name: sp?.name || null,
+          cashier_name: getActorName(state),
+          notes: notes?.trim() || null,
+        })
+        .select()
+        .single();
+
+      if (error || !data) {
+        console.error('Hold invoice error:', error);
+        alert('تعذّر حفظ الفاتورة المعلقة: ' + (error?.message || 'خطأ غير معروف'));
+        return false;
+      }
+
+      // Reserve stock.
+      for (const item of state.cart) {
+        const newQty = (state.products.find((p) => p.id === item.id)?.stock_quantity ?? 0) - item.quantity;
+        await supabase.from('products').update({ stock_quantity: Math.max(0, newQty) }).eq('id', item.id);
+      }
+
+      const updatedProducts = state.products.map((p) => {
+        const cartItem = state.cart.find((c) => c.id === p.id);
+        return cartItem ? { ...p, stock_quantity: Math.max(0, p.stock_quantity - cartItem.quantity) } : p;
+      });
+
+      set({
+        heldInvoices: [{ ...(data as any), items } as HeldInvoice, ...state.heldInvoices],
+        products: updatedProducts,
+        cart: [],
+        invoiceType: 'retail',
+        salespeople: [],
+      });
+
+      new BroadcastChannel('cashier-sync').postMessage('sync_products');
+      return true;
+    } catch (err) {
+      console.error('Failed to hold invoice:', err);
+      alert('تعذّر حفظ الفاتورة المعلقة.');
+      return false;
+    }
+  },
+
+  // تأكيد البيع: تُعاد الكمية المحجوزة للمخزون ويُحذف سجل الحجز، وتُحمَّل الأصناف
+  // في السلة ليُكمل الكاشير عملية البيع والتحصيل والطباعة بشكل طبيعي (الكاشير
+  // عند الإتمام يخصم الكمية من جديد، فالنتيجة الصافية لا تغيّر المخزون).
+  confirmHeldInvoice: async (id) => {
+    const state = get();
+    const held = state.heldInvoices.find((h) => h.id === id);
+    if (!held) return null;
+    try {
+      const { error } = await supabase.from('held_invoices').delete().eq('id', id);
+      if (error) {
+        console.error('Confirm held invoice delete error:', error);
+        alert('تعذّر تأكيد الفاتورة المعلقة: ' + error.message);
+        return null;
+      }
+
+      // Return the reserved stock so the upcoming checkout deducts it cleanly.
+      for (const item of held.items) {
+        const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
+        const currentStock = (prodData as any)?.stock_quantity ?? 0;
+        await supabase.from('products').update({ stock_quantity: currentStock + item.quantity }).eq('id', item.id);
+      }
+
+      const restoredProducts = state.products.map((p) => {
+        const it = held.items.find((i) => i.id === p.id);
+        return it ? { ...p, stock_quantity: p.stock_quantity + it.quantity } : p;
+      });
+
+      // Rebuild cart items from the held items + the latest product record.
+      const cartItems: OrderItem[] = held.items.map((it) => {
+        const prod = restoredProducts.find((p) => p.id === it.id);
+        const base: any = prod ? { ...prod } : {
+          id: it.id, name: it.name, barcode: it.barcode || '',
+          purchase_price: it.purchase_price || 0,
+          average_purchase_price: it.average_purchase_price || it.purchase_price || 0,
+          sale_price: it.sale_price, stock_quantity: it.quantity,
+          category_id: it.category_id || '', unit: it.unit || 'قطعة',
+        };
+        return { ...base, sale_price: it.sale_price, quantity: it.quantity, returned_quantity: 0 };
+      });
+
+      set({
+        heldInvoices: state.heldInvoices.filter((h) => h.id !== id),
+        products: restoredProducts,
+        cart: cartItems,
+        invoiceType: held.invoice_type || 'retail',
+        salespeople: held.salesperson_id ? [{ id: held.salesperson_id, name: held.salesperson_name || '' }] : [],
+      });
+
+      new BroadcastChannel('cashier-sync').postMessage('sync_products');
+      return held;
+    } catch (err) {
+      console.error('Failed to confirm held invoice:', err);
+      alert('تعذّر تأكيد الفاتورة المعلقة.');
+      return null;
+    }
+  },
+
+  // إرجاع للمخزون: تُعاد الكمية المحجوزة ويُحذف سجل الحجز.
+  returnHeldInvoice: async (id) => {
+    const state = get();
+    const held = state.heldInvoices.find((h) => h.id === id);
+    if (!held) return false;
+    try {
+      const { error } = await supabase.from('held_invoices').delete().eq('id', id);
+      if (error) {
+        console.error('Return held invoice error:', error);
+        alert('تعذّر إرجاع الفاتورة للمخزون: ' + error.message);
+        return false;
+      }
+      for (const item of held.items) {
+        const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
+        const currentStock = (prodData as any)?.stock_quantity ?? 0;
+        await supabase.from('products').update({ stock_quantity: currentStock + item.quantity }).eq('id', item.id);
+      }
+      const restoredProducts = state.products.map((p) => {
+        const it = held.items.find((i) => i.id === p.id);
+        return it ? { ...p, stock_quantity: p.stock_quantity + it.quantity } : p;
+      });
+      set({
+        heldInvoices: state.heldInvoices.filter((h) => h.id !== id),
+        products: restoredProducts,
+      });
+      new BroadcastChannel('cashier-sync').postMessage('sync_products');
+      return true;
+    } catch (err) {
+      console.error('Failed to return held invoice:', err);
+      alert('تعذّر إرجاع الفاتورة للمخزون.');
+      return false;
+    }
+  },
+
+  // إرجاع تلقائي للفواتير المعلقة المنتهية (تجاوزت أسبوعاً) للمخزون. مستقل عن
+  // الحالة المحلية حتى يعمل بشكل صحيح حتى لو سبق التحميل.
+  sweepExpiredHeldInvoices: async () => {
+    try {
+      const nowIso = new Date().toISOString();
+      const { data, error } = await supabase
+        .from('held_invoices')
+        .select('*')
+        .lt('expires_at', nowIso);
+      if (error || !data || data.length === 0) return;
+
+      for (const row of data as any[]) {
+        const { error: delErr } = await supabase.from('held_invoices').delete().eq('id', row.id);
+        if (delErr) { console.error('Sweep delete error:', delErr); continue; }
+        const items = Array.isArray(row.items) ? row.items : [];
+        for (const item of items) {
+          const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
+          const currentStock = (prodData as any)?.stock_quantity ?? 0;
+          await supabase.from('products').update({ stock_quantity: currentStock + (item.quantity || 0) }).eq('id', item.id);
+        }
+      }
+
+      const expiredIds = new Set((data as any[]).map((r) => r.id));
+      const expiredItemQty = new Map<string, number>();
+      for (const row of data as any[]) {
+        const items = Array.isArray(row.items) ? row.items : [];
+        for (const it of items) expiredItemQty.set(it.id, (expiredItemQty.get(it.id) || 0) + (it.quantity || 0));
+      }
+      set((s) => ({
+        heldInvoices: s.heldInvoices.filter((h) => !expiredIds.has(h.id)),
+        products: s.products.map((p) => expiredItemQty.has(p.id)
+          ? { ...p, stock_quantity: p.stock_quantity + (expiredItemQty.get(p.id) || 0) }
+          : p),
+      }));
+      new BroadcastChannel('cashier-sync').postMessage('sync_products');
+    } catch (e) {
+      console.error('Failed to sweep expired held invoices:', e);
     }
   },
 
@@ -1461,6 +1917,8 @@ export const useStore = create<CashierStore>((set, get) => ({
         paid_visa: splits.visa,
         paid_wallet: splits.wallet,
         paid_instapay: splits.instapay,
+        paid_method5: splits.method5 || 0,
+        paid_method6: splits.method6 || 0,
         type: 'payment',
         customer_id: customerId,
         payment_method: paymentMethod,
@@ -1512,17 +1970,9 @@ export const useStore = create<CashierStore>((set, get) => ({
         updatedItems = updatedItems.map((i) =>
           i.id === ret.productId ? { ...i, returned_quantity: i.returned_quantity + ret.returnQty, refunded_amount: (i.refunded_amount || 0) + ret.refundAmount } : i
         );
-        updatedProducts = updatedProducts.map((p) => {
-          if (p.id === ret.productId) {
-            const item = order.items.find(x => x.id === ret.productId);
-            const stripsPerBox = p.strips_per_box || 1;
-            const restoreQty = (item?.unit === 'شريط' && p.has_strips)
-              ? ret.returnQty / stripsPerBox
-              : ret.returnQty;
-            return { ...p, stock_quantity: p.stock_quantity + restoreQty };
-          }
-          return p;
-        });
+        updatedProducts = updatedProducts.map((p) =>
+          p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + ret.returnQty } : p
+        );
       }
 
       // Handle paid_amount adjustments based on cash refunded
@@ -1612,18 +2062,14 @@ export const useStore = create<CashierStore>((set, get) => ({
 
         const product = updatedProducts.find((p) => p.id === ret.productId);
         if (product) {
-          const stripsPerBox = product.strips_per_box || 1;
-          const restoreQty = (item.unit === 'شريط' && product.has_strips)
-            ? ret.returnQty / stripsPerBox
-            : ret.returnQty;
           const { error: prodError } = await supabase
             .from('products')
-            .update({ stock_quantity: product.stock_quantity + restoreQty })
+            .update({ stock_quantity: product.stock_quantity + ret.returnQty })
             .eq('id', ret.productId);
           if (prodError) throw prodError;
           
           updatedProducts = updatedProducts.map((p) =>
-            p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + restoreQty } : p
+            p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + ret.returnQty } : p
           );
         }
 
@@ -1705,17 +2151,10 @@ export const useStore = create<CashierStore>((set, get) => ({
     const isUUID = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str);
     const stockRestores = order.type === 'sale'
       ? order.items
-          .map((item) => {
-            const netQty = Math.max(0, (Number(item.quantity) || 0) - (Number(item.returned_quantity) || 0));
-            const stripsPerBox = item.strips_per_box || 1;
-            const restoreQty = (item.has_strips && item.unit === 'شريط')
-              ? netQty / stripsPerBox
-              : netQty;
-            return {
-              productId: item.id,
-              quantity: restoreQty,
-            };
-          })
+          .map((item) => ({
+            productId: item.id,
+            quantity: Math.max(0, (Number(item.quantity) || 0) - (Number(item.returned_quantity) || 0)),
+          }))
           .filter((item) => item.quantity > 0 && isUUID(item.productId))
       : [];
 
@@ -1831,20 +2270,12 @@ export const useStore = create<CashierStore>((set, get) => ({
       
       // Add back old quantities
       for (const item of order.items) {
-        const stripsPerBox = item.strips_per_box || 1;
-        const deduct = (item.has_strips && item.unit === 'شريط')
-          ? item.quantity / stripsPerBox
-          : item.quantity;
-        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) + deduct);
+        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) + item.quantity);
       }
       
       // Subtract new quantities
       for (const item of updatedItems) {
-        const stripsPerBox = item.strips_per_box || 1;
-        const deduct = (item.has_strips && item.unit === 'شريط')
-          ? item.quantity / stripsPerBox
-          : item.quantity;
-        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) - deduct);
+        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) - item.quantity);
       }
 
       const updatedProducts = [...state.products];
@@ -1918,7 +2349,6 @@ export const useStore = create<CashierStore>((set, get) => ({
         returned_quantity: item.returned_quantity || 0,
         sale_price: item.sale_price,
         purchase_price: item.average_purchase_price || item.purchase_price,
-        unit: item.unit
       }));
 
       const { error: itemsError } = await supabase
@@ -1971,6 +2401,13 @@ export const useStore = create<CashierStore>((set, get) => ({
     }
   },
 
+  // يسجّل بيانات الاستبدال على الفاتورة (قبل/بعد) لمنع تكراره وعرضه لاحقاً.
+  markOrderExchanged: async (orderId, exchangeData) => {
+    const { error } = await supabase.from('orders').update({ exchange_data: exchangeData }).eq('id', orderId);
+    if (error) { console.error('markOrderExchanged:', error); return false; }
+    set((state) => ({ orders: state.orders.map((o) => (o.id === orderId ? { ...o, exchange_data: exchangeData } : o)) }));
+    return true;
+  },
 
   syncOfflineReturnsQueue: async () => {
     const state = get();
@@ -1989,7 +2426,7 @@ export const useStore = create<CashierStore>((set, get) => ({
         for (const returnItem of batchReturns) {
           const orderItemRow = await supabase
             .from('order_items')
-            .select('id, returned_quantity, refunded_amount, unit')
+            .select('id, returned_quantity, refunded_amount')
             .eq('order_id', batchOrderId)
             .eq('product_id', returnItem.productId)
             .single();
@@ -2011,22 +2448,16 @@ export const useStore = create<CashierStore>((set, get) => ({
 
           const { data: prodData, error: prodGetError } = await supabase
             .from('products')
-            .select('stock_quantity, has_strips, strips_per_box')
+            .select('stock_quantity')
             .eq('id', returnItem.productId)
             .single();
           
           if (prodGetError) throw prodGetError;
 
           const currentStock = prodData?.stock_quantity ?? 0;
-          const soldUnit = (orderItemRow.data as any)?.unit || 'قطعة';
-          const stripsPerBox = prodData?.strips_per_box || 1;
-          const restoreQty = (soldUnit === 'شريط' && prodData?.has_strips)
-            ? returnItem.returnQty / stripsPerBox
-            : returnItem.returnQty;
-
           const { error: prodError } = await supabase
             .from('products')
-            .update({ stock_quantity: currentStock + restoreQty })
+            .update({ stock_quantity: currentStock + returnItem.returnQty })
             .eq('id', returnItem.productId);
           
           if (prodError) throw prodError;
@@ -2092,6 +2523,8 @@ export const useStore = create<CashierStore>((set, get) => ({
         paid_visa: (o.paid_visa as number) ?? 0,
         paid_wallet: (o.paid_wallet as number) ?? 0,
         paid_instapay: (o.paid_instapay as number) ?? 0,
+        paid_method5: (o.paid_method5 as number) ?? 0,
+        paid_method6: (o.paid_method6 as number) ?? 0,
         type: (o.type as string) as 'sale' | 'payment' ?? 'sale',
         payment_method: (o.payment_method as any) ?? 'cash',
         date: o.created_at as string,
@@ -2120,21 +2553,269 @@ export const useStore = create<CashierStore>((set, get) => ({
   },
 
   addCashier: async (cashier) => {
-    // NOTE: after Supabase Auth is enabled, a newly added cashier cannot log in
-    // until a matching Auth user is created. Re-run scripts/provision_auth_users.cjs
-    // (or create the Auth user via the Supabase dashboard) — see SECURITY_SETUP.md.
-    const { data } = await supabase.from('cashiers').insert(cashier).select().single();
-    if (data) set((state) => ({ cashiers: [data as unknown as Cashier, ...state.cashiers] }));
+    const { data, error } = await supabase.from('cashiers').insert(cashier).select().single();
+    if (error) {
+      console.error('Add Cashier Error:', error);
+      alert('تعذّر حفظ المحاسب في قاعدة البيانات:\n' + (error.message || '') + '\n(غالباً لازم تعملي تسجيل دخول من جديد كأدمن.)');
+      return;
+    }
+    if (!data) return;
+    const row = data as unknown as Cashier;
+    // Auto-create the cashier's login (Supabase Auth) so they can sign in right away.
+    if (row.password) {
+      const r = await provisionCashierAuth(row.id, row.password);
+      if (r.ok) row.email = `cashier-${row.id}@cashier.local`;
+      else alert('تم حفظ بيانات الكاشير، لكن تعذّر إنشاء حساب الدخول تلقائياً:\n' + (r.error || '') + '\n\nتأكد أن SUPABASE_SERVICE_ROLE_KEY مضبوط في Vercel، ثم عدّل الكاشير وأعد حفظ الباسورد.');
+    }
+    set((state) => ({ cashiers: [row, ...state.cashiers] }));
+
+    // Auto-create a linked employee profile (so the cashier gets salary + sales commission).
+    try {
+      const { data: emp } = await supabase.from('employees')
+        .insert({ name: row.name, job_title: 'كاشير', phone: row.phone || '', cashier_id: row.id, monthly_salary: 0, commission_rate: 0 })
+        .select().single();
+      if (emp) set((state) => ({ employees: [emp as unknown as Employee, ...state.employees] }));
+    } catch (e) {
+      console.warn('Could not auto-create employee for cashier:', e);
+    }
   },
 
   updateCashier: async (id, updated) => {
     await supabase.from('cashiers').update(updated).eq('id', id);
+    // If the password changed, sync it to the cashier's login account.
+    if (updated.password) {
+      const r = await provisionCashierAuth(id, updated.password);
+      if (r.ok) updated = { ...updated, email: `cashier-${id}@cashier.local` };
+      else alert('تم حفظ التعديل، لكن تعذّر تحديث حساب الدخول:\n' + (r.error || '') + '\n\nتأكد أن SUPABASE_SERVICE_ROLE_KEY مضبوط في Vercel.');
+    }
     set((state) => ({ cashiers: state.cashiers.map((c) => (c.id === id ? { ...c, ...updated } : c)) }));
   },
 
   deleteCashier: async (id) => {
     await supabase.from('cashiers').delete().eq('id', id);
     set((state) => ({ cashiers: state.cashiers.filter((c) => c.id !== id) }));
+  },
+
+  // ── Manufacturing ────────────────────────────────────────────
+  loadManufacturing: async () => {
+    const [mRes, pRes] = await Promise.all([
+      supabase.from('materials').select('*').order('created_at', { ascending: false }),
+      supabase.from('production_orders').select('*').order('created_at', { ascending: false }),
+    ]);
+    set({
+      materials: (mRes.data ?? []) as unknown as Material[],
+      productionOrders: (pRes.data ?? []) as unknown as ProductionOrder[],
+    });
+  },
+
+  addMaterial: async (m, payment) => {
+    const supplierId = payment?.supplierId || null;
+    const split = payment?.split || { cash: 0, visa: 0, wallet: 0, instapay: 0 };
+    const { data } = await supabase.from('materials').insert({ ...m, supplier_id: supplierId }).select().single();
+    if (data) set((s) => ({ materials: [data as unknown as Material, ...s.materials] }));
+
+    const total = (Number(m.cost_per_unit) || 0) * (Number(m.stock_quantity) || 0);
+    if (total <= 0) return;
+
+    const paid = (Number(split.cash) || 0) + (Number(split.visa) || 0) + (Number(split.wallet) || 0) + (Number(split.instapay) || 0);
+    const primary = split.cash >= split.visa && split.cash >= split.wallet && split.cash >= split.instapay ? 'cash'
+      : split.visa >= split.wallet && split.visa >= split.instapay ? 'visa'
+      : split.wallet >= split.instapay ? 'wallet' : 'instapay';
+
+    if (supplierId) {
+      // مشتريات من مورد: تُسجّل كفاتورة شراء — الباقي (total - paid) يبقى دين على المورد يُسدَّد لاحقاً.
+      const { data: inv } = await supabase.from('purchase_invoices').insert({
+        invoice_number: `MAT-${Date.now()}`,
+        supplier_id: supplierId,
+        total,
+        paid_amount: paid,
+        paid_cash: split.cash || 0,
+        paid_visa: split.visa || 0,
+        paid_wallet: split.wallet || 0,
+        paid_instapay: split.instapay || 0,
+        paid_method5: split.method5 || 0,
+        paid_method6: split.method6 || 0,
+        payment_method: primary,
+      }).select().single();
+      if (inv) set((s) => ({ purchaseInvoices: [{ ...(inv as any), items: [] }, ...s.purchaseInvoices] }));
+    } else {
+      // بدون مورد: مصروف "شراء خامات" بالمبلغ المدفوع فعلاً (نقدي مباشر).
+      await get().addExpense({
+        category: 'شراء خامات',
+        amount: total,
+        note: `شراء خامة: ${m.name}`,
+        payment_method: primary,
+        paid_cash: split.cash || 0,
+        paid_visa: split.visa || 0,
+        paid_wallet: split.wallet || 0,
+        paid_instapay: split.instapay || 0,
+        paid_method5: split.method5 || 0,
+        paid_method6: split.method6 || 0,
+      } as Omit<Expense, 'id' | 'date'>);
+    }
+  },
+
+  updateMaterial: async (id, m) => {
+    await supabase.from('materials').update(m).eq('id', id);
+    set((s) => ({ materials: s.materials.map((x) => (x.id === id ? { ...x, ...m } : x)) }));
+  },
+
+  deleteMaterial: async (id) => {
+    await supabase.from('materials').delete().eq('id', id);
+    set((s) => ({ materials: s.materials.filter((x) => x.id !== id) }));
+  },
+
+  // تحويل قطع من مخزن المصنع للبيع (عرض/مستودع) → تتاح في الكاشير.
+  transferFromFactory: async (productId, toDisplay, toWarehouse) => {
+    const state = get();
+    const p = state.products.find((x) => x.id === productId);
+    if (!p) return false;
+    const factory = Number(p.factory_quantity) || 0;
+    const dis = Math.max(0, Number(toDisplay) || 0);
+    const wh = Math.max(0, Number(toWarehouse) || 0);
+    const move = dis + wh;
+    if (move <= 0) { alert('أدخل كمية للتحويل'); return false; }
+    if (move > factory + 0.001) { alert('الكمية المطلوبة أكبر من المتاح في مخزن المصنع'); return false; }
+    const newFactory = factory - move;
+    const newStock = (Number(p.stock_quantity) || 0) + move;
+    const newDisplay = (Number(p.display_quantity) || 0) + dis;
+    const { error } = await supabase.from('products').update({
+      factory_quantity: newFactory,
+      stock_quantity: newStock,
+      display_quantity: newDisplay,
+    }).eq('id', productId);
+    if (error) { alert('فشل التحويل: ' + error.message); return false; }
+    set((s) => ({ products: s.products.map((x) => (x.id === productId ? { ...x, factory_quantity: newFactory, stock_quantity: newStock, display_quantity: newDisplay } : x)) }));
+    new BroadcastChannel('cashier-sync').postMessage('sync_products');
+    return true;
+  },
+
+  addProductionOrder: async (input) => {
+    const state = get();
+    const usedMaterials = input.materials
+      .map((m) => ({ ...m, mat: state.materials.find((x) => x.id === m.material_id) }))
+      .filter((m) => m.mat && m.quantity > 0);
+
+    const materials_cost = usedMaterials.reduce((s, m) => s + (m.mat!.cost_per_unit * m.quantity), 0);
+    const extra_costs = Number(input.extra_costs) || 0;
+    const quantity = Number(input.quantity) || 0;
+    const total_cost = materials_cost + extra_costs;
+    const cost_per_piece = quantity > 0 ? total_cost / quantity : 0;
+
+    if (quantity <= 0) { alert('من فضلك أدخل عدد القطع المنتجة'); return false; }
+
+    // توزيع القطع: عرض + مستودع = متاح للبيع (الكاشير)، والباقي يبقى في مخزن المصنع.
+    const display = Math.max(0, Math.min(quantity, Number(input.display_quantity) || 0));
+    const warehouse = Math.max(0, Math.min(quantity - display, Number(input.warehouse_quantity) || 0));
+    const sellable = display + warehouse;
+    const factory = Math.max(0, quantity - sellable);
+
+    try {
+      // 1) خصم الخامات من المخزون
+      for (const m of usedMaterials) {
+        const newStock = (m.mat!.stock_quantity || 0) - m.quantity;
+        const { error } = await supabase.from('materials').update({ stock_quantity: newStock }).eq('id', m.material_id);
+        if (error) throw error;
+      }
+
+      // 2) إضافة المنتج المُصنّع للمخزون (تجميع بالكود مع متوسط التكلفة)
+      let productId: string | undefined;
+      const code = (input.code || '').trim();
+      const existing = code ? state.products.find((p) => p.barcode === code) : undefined;
+      if (existing) {
+        const oldStock = Number(existing.stock_quantity) || 0;
+        const oldFactory = Number(existing.factory_quantity) || 0;
+        const oldDisplay = Number(existing.display_quantity) || 0;
+        const oldAvg = Number(existing.average_purchase_price ?? existing.purchase_price) || 0;
+        const oldPieces = oldStock + oldFactory;
+        const newAvg = (oldPieces + quantity) > 0 ? ((oldAvg * oldPieces) + total_cost) / (oldPieces + quantity) : cost_per_piece;
+        const { error } = await supabase.from('products').update({
+          stock_quantity: oldStock + sellable,
+          display_quantity: oldDisplay + display,
+          factory_quantity: oldFactory + factory,
+          average_purchase_price: newAvg,
+          purchase_price: newAvg,
+          sale_price: input.sale_price,
+          color: input.color || existing.color || null,
+        }).eq('id', existing.id);
+        if (error) throw error;
+        productId = existing.id;
+      } else {
+        const { data, error } = await supabase.from('products').insert({
+          name: input.product_name,
+          barcode: code || null,
+          color: input.color || null,
+          unit: 'قطعة',
+          stock_quantity: sellable,
+          display_quantity: display,
+          factory_quantity: factory,
+          sale_price: input.sale_price,
+          purchase_price: cost_per_piece,
+          average_purchase_price: cost_per_piece,
+        }).select().single();
+        if (error) throw error;
+        productId = (data as Record<string, unknown>)?.id as string;
+      }
+
+      // 3) تسجيل أمر التصنيع
+      const { data: poData, error: poErr } = await supabase.from('production_orders').insert({
+        product_id: productId ?? null,
+        product_name: input.product_name,
+        color: input.color || null,
+        code: code || null,
+        quantity,
+        materials_cost,
+        extra_costs,
+        total_cost,
+        cost_per_piece,
+        sale_price: input.sale_price,
+        notes: input.notes || null,
+      }).select().single();
+      if (poErr) throw poErr;
+      const poId = (poData as Record<string, unknown>)?.id as string;
+
+      // 4) تسجيل الخامات المستهلكة
+      if (poId && usedMaterials.length) {
+        await supabase.from('production_materials').insert(usedMaterials.map((m) => ({
+          production_id: poId,
+          material_id: m.material_id,
+          material_name: m.mat!.name,
+          quantity: m.quantity,
+          cost: m.mat!.cost_per_unit * m.quantity,
+        })));
+      }
+
+      // Manufacturing labor / extra costs are a real cash outflow — split-aware.
+      if (extra_costs > 0) {
+        const sp = input.extra_costs_split;
+        const spSum = sp ? (Number(sp.cash) || 0) + (Number(sp.visa) || 0) + (Number(sp.wallet) || 0) + (Number(sp.instapay) || 0) : 0;
+        const finalSplit = sp && spSum > 0 ? sp : { cash: extra_costs, visa: 0, wallet: 0, instapay: 0 };
+        const primary = finalSplit.cash >= finalSplit.visa && finalSplit.cash >= finalSplit.wallet && finalSplit.cash >= finalSplit.instapay ? 'cash'
+          : finalSplit.visa >= finalSplit.wallet && finalSplit.visa >= finalSplit.instapay ? 'visa'
+          : finalSplit.wallet >= finalSplit.instapay ? 'wallet' : 'instapay';
+        await get().addExpense({
+          category: 'تكاليف تصنيع',
+          amount: extra_costs,
+          note: `مصنعية: ${input.product_name}${input.notes ? ' — ' + input.notes : ''}`,
+          payment_method: primary,
+          paid_method5: finalSplit.method5 || 0,
+          paid_method6: finalSplit.method6 || 0,
+          paid_cash: finalSplit.cash || 0,
+          paid_visa: finalSplit.visa || 0,
+          paid_wallet: finalSplit.wallet || 0,
+          paid_instapay: finalSplit.instapay || 0,
+        } as Omit<Expense, 'id' | 'date'>);
+      }
+
+      await get().loadManufacturing();
+      await get().loadProductsOnly();
+      new BroadcastChannel('cashier-sync').postMessage('sync_products');
+      return true;
+    } catch (e) {
+      console.error('addProductionOrder failed:', e);
+      alert('فشل حفظ أمر التصنيع: ' + String((e as Record<string, unknown>)?.message || e));
+      return false;
+    }
   },
 
   deleteCashierNote: async (id) => {
@@ -2210,6 +2891,11 @@ export const useStore = create<CashierStore>((set, get) => ({
     if (newSettings.whatsappCountryCode !== undefined) mapped.whatsapp_country_code = newSettings.whatsappCountryCode;
     if (newSettings.initial_balance !== undefined) mapped.initial_balance = newSettings.initial_balance;
     if (newSettings.locationUrl !== undefined) mapped.location_url = newSettings.locationUrl;
+    if (newSettings.cashierPermissions !== undefined) mapped.cashier_permissions = newSettings.cashierPermissions;
+    if (newSettings.paymentLabels !== undefined) mapped.payment_labels = newSettings.paymentLabels;
+    if (newSettings.paymentMethodsEnabled !== undefined) mapped.payment_methods_enabled = newSettings.paymentMethodsEnabled;
+    if (newSettings.showInvoiceProfit !== undefined) mapped.show_invoice_profit = newSettings.showInvoiceProfit;
+    if (newSettings.allowCashierEmployeeAdvance !== undefined) mapped.allow_cashier_employee_advance = newSettings.allowCashierEmployeeAdvance;
 
     const { data: existing } = await supabase.from('store_settings').select('id').limit(1).maybeSingle();
     
@@ -2829,6 +3515,31 @@ setupRealtime: () => {
     await supabase.from('products').delete().eq('id', id);
   },
 
+  // تسوية الجرد: تحديث مخزون المنتجات للكمية المجرودة وتسجيل الفروق.
+  adjustStock: async (items, note) => {
+    const state = get();
+    const rows: any[] = [];
+    const updatedProducts = [...state.products];
+    for (const it of items) {
+      const p = state.products.find((x) => x.id === it.product_id);
+      if (!p) continue;
+      const system = Number(p.stock_quantity) || 0;
+      const counted = Number(it.counted_qty);
+      if (isNaN(counted) || Math.abs(counted - system) < 0.0001) continue; // تجاهل غير المتغيّر
+      const diff = counted - system;
+      const cost = Number(p.average_purchase_price ?? p.purchase_price) || 0;
+      const { error } = await supabase.from('products').update({ stock_quantity: counted }).eq('id', it.product_id);
+      if (error) continue;
+      rows.push({ product_id: it.product_id, product_name: p.name, system_qty: system, counted_qty: counted, diff, cost, note: note || null });
+      const idx = updatedProducts.findIndex((x) => x.id === it.product_id);
+      if (idx >= 0) updatedProducts[idx] = { ...updatedProducts[idx], stock_quantity: counted };
+    }
+    if (rows.length) await supabase.from('stock_adjustments').insert(rows);
+    set({ products: updatedProducts });
+    new BroadcastChannel('cashier-sync').postMessage('sync_products');
+    return rows.length;
+  },
+
   // ── Expenses ──────────────────────────────────────────────
   addExpense: async (expense) => {
     const { data, error } = await supabase.from('expenses').insert({
@@ -2838,6 +3549,8 @@ setupRealtime: () => {
       paid_visa: expense.paid_visa || 0,
       paid_wallet: expense.paid_wallet || 0,
       paid_instapay: expense.paid_instapay || 0,
+      paid_method5: (expense as any).paid_method5 || 0,
+      paid_method6: (expense as any).paid_method6 || 0,
       note: expense.note,
       payment_method: expense.payment_method,
       car_id: expense.car_id || null
@@ -2857,6 +3570,8 @@ setupRealtime: () => {
         paid_visa: (data as any).paid_visa || 0,
         paid_wallet: (data as any).paid_wallet || 0,
         paid_instapay: (data as any).paid_instapay || 0,
+        paid_method5: (data as any).paid_method5 || 0,
+        paid_method6: (data as any).paid_method6 || 0,
         note: (data as any).note,
         payment_method: (data as any).payment_method,
         date: (data as any).created_at,
@@ -2864,6 +3579,125 @@ setupRealtime: () => {
       };
       set((state) => ({ expenses: [newExp, ...state.expenses] }));
     }
+  },
+
+  // سحب المدير: يُسجّل كمصروف "سحب مدير" (يخصم من الخزنة) + تنبيه تليجرام. لا يُحذف.
+  managerWithdraw: async (managerName, split) => {
+    const total = (split.cash || 0) + (split.visa || 0) + (split.wallet || 0) + (split.instapay || 0);
+    if (total <= 0) return false;
+    const primary = split.cash >= split.visa && split.cash >= split.wallet && split.cash >= split.instapay ? 'cash'
+      : split.visa >= split.wallet && split.visa >= split.instapay ? 'visa'
+      : split.wallet >= split.instapay ? 'wallet' : 'instapay';
+    await get().addExpense({
+      category: 'سحب مدير',
+      amount: total,
+      note: managerName,
+      payment_method: primary,
+      paid_cash: split.cash || 0,
+      paid_visa: split.visa || 0,
+      paid_wallet: split.wallet || 0,
+      paid_instapay: split.instapay || 0,
+    } as Omit<Expense, 'id' | 'date'>);
+    sendTelegramAlert({
+      type: 'manager_withdrawal',
+      actor: getActorName(get()),
+      currency: get().storeSettings.currency,
+      description: `سحب باسم المدير: ${managerName}`,
+      amount: total,
+      paymentMethod: primary,
+      date: new Date().toISOString(),
+    });
+    return true;
+  },
+
+  // معاملة شريك (إيداع/سحب). على خزنة المحل تنعكس في الخزنة كمصروف/إيراد؛ على الخزنة
+  // الأساسية تُسجَّل في دفتر الشركاء فقط. لا تُحذف.
+  recordPartnerTransaction: async (tx) => {
+    const amount = Math.abs(Number(tx.amount) || 0);
+    if (amount <= 0) return false;
+    const method = tx.method || 'cash';
+    const split = {
+      cash: method === 'cash' ? amount : 0,
+      visa: method === 'visa' ? amount : 0,
+      wallet: method === 'wallet' ? amount : 0,
+      instapay: method === 'instapay' ? amount : 0,
+      method5: method === 'method5' ? amount : 0,
+      method6: method === 'method6' ? amount : 0,
+    };
+    const { data, error } = await supabase.from('partner_transactions').insert({
+      partner_id: tx.partner_id,
+      partner_name: tx.partner_name,
+      type: tx.type,
+      amount,
+      treasury: tx.treasury,
+      method,
+      note: tx.note || null,
+    }).select().single();
+    if (error) { alert('فشل حفظ معاملة الشريك: ' + error.message); return false; }
+
+    // انعكاس على خزنة المحل فقط
+    if (tx.treasury === 'shop') {
+      if (tx.type === 'withdraw') {
+        await get().addExpense({
+          category: 'سحب شريك', amount, note: `سحب الشريك: ${tx.partner_name}`,
+          payment_method: method, paid_cash: split.cash, paid_visa: split.visa, paid_wallet: split.wallet, paid_instapay: split.instapay, paid_method5: split.method5 || 0, paid_method6: split.method6 || 0,
+        } as Omit<Expense, 'id' | 'date'>);
+      } else {
+        // إيداع = إيراد للخزنة (مبلغ سالب في المصروفات)
+        await get().addExpense({
+          category: 'إيداع شريك', amount: -amount, note: `إيداع الشريك: ${tx.partner_name}`,
+          payment_method: method, paid_cash: split.cash, paid_visa: split.visa, paid_wallet: split.wallet, paid_instapay: split.instapay, paid_method5: split.method5 || 0, paid_method6: split.method6 || 0,
+        } as Omit<Expense, 'id' | 'date'>);
+      }
+    }
+
+    sendTelegramAlert({
+      type: tx.type === 'withdraw' ? 'partner_withdraw' : 'partner_deposit',
+      actor: getActorName(get()),
+      currency: get().storeSettings.currency,
+      description: `${tx.type === 'withdraw' ? 'سحب' : 'إيداع'} للشريك ${tx.partner_name} — ${tx.treasury === 'shop' ? 'خزنة المحل' : 'الخزنة الأساسية'}`,
+      amount,
+      paymentMethod: method,
+      date: new Date().toISOString(),
+    });
+    return data ? true : true;
+  },
+
+  // تحويل بين خزنة المحل وخزنة الادخار (كل طريقة بطريقتها). ينعكس على خزنة المحل
+  // كمصروف (تحويل للادخار) أو إيراد (تحويل من الادخار)، ويُسجَّل في دفتر الادخار.
+  savingsTransfer: async (split, direction, source, note) => {
+    const s = { cash: Number(split?.cash) || 0, visa: Number(split?.visa) || 0, wallet: Number(split?.wallet) || 0, instapay: Number(split?.instapay) || 0, method5: Number(split?.method5) || 0, method6: Number(split?.method6) || 0 };
+    const total = s.cash + s.visa + s.wallet + s.instapay + s.method5 + s.method6;
+    if (total <= 0) return false;
+    const primary = s.cash >= s.visa && s.cash >= s.wallet && s.cash >= s.instapay ? 'cash'
+      : s.visa >= s.wallet && s.visa >= s.instapay ? 'visa'
+      : s.wallet >= s.instapay ? 'wallet' : 'instapay';
+
+    // انعكاس على خزنة المحل
+    await get().addExpense({
+      category: direction === 'in' ? 'تحويل لخزنة الادخار' : 'تحويل من خزنة الادخار',
+      amount: direction === 'in' ? total : -total,
+      note: note || (direction === 'in' ? 'تحويل من المحل للادخار' : 'تحويل من الادخار للمحل'),
+      payment_method: primary,
+      paid_cash: s.cash, paid_visa: s.visa, paid_wallet: s.wallet, paid_instapay: s.instapay, paid_method5: s.method5 || 0, paid_method6: s.method6 || 0,
+    } as Omit<Expense, 'id' | 'date'>);
+
+    // دفتر الادخار: صف لكل طريقة بمبلغ
+    const rows = (['cash', 'visa', 'wallet', 'instapay', 'method5', 'method6'] as const)
+      .filter((m) => s[m] > 0)
+      .map((m) => ({ direction, amount: s[m], method: m, source: source || 'manual', note: note || null }));
+    if (rows.length) await supabase.from('savings_transactions').insert(rows);
+
+    sendTelegramAlert({
+      type: direction === 'in' ? 'savings_in' : 'savings_out',
+      actor: getActorName(get()),
+      currency: get().storeSettings.currency,
+      description: `${direction === 'in' ? 'تحويل للادخار' : 'تحويل من الادخار'}: ${total.toFixed(2)}`,
+      amount: total,
+      paymentMethod: primary,
+      date: new Date().toISOString(),
+    });
+    return true;
   },
 
   updateExpense: async (id, expense) => {
@@ -2874,6 +3708,8 @@ setupRealtime: () => {
       paid_visa: expense.paid_visa,
       paid_wallet: expense.paid_wallet,
       paid_instapay: expense.paid_instapay,
+      paid_method5: (expense as any).paid_method5,
+      paid_method6: (expense as any).paid_method6,
       note: expense.note,
       payment_method: expense.payment_method,
       created_at: expense.date
@@ -3186,6 +4022,8 @@ setupRealtime: () => {
         paid_visa: splits.visa,
         paid_wallet: splits.wallet,
         paid_instapay: splits.instapay,
+        paid_method5: splits.method5 || 0,
+        paid_method6: splits.method6 || 0,
         payment_method: invoice.payment_method
       })
       .select()
@@ -3345,6 +4183,8 @@ setupRealtime: () => {
         paid_visa: splits.visa,
         paid_wallet: splits.wallet,
         paid_instapay: splits.instapay,
+        paid_method5: splits.method5 || 0,
+        paid_method6: splits.method6 || 0,
         payment_method: invoice.payment_method
       })
       .eq('id', invoiceId)
@@ -3447,6 +4287,8 @@ setupRealtime: () => {
           paid_visa: splits.visa,
           paid_wallet: splits.wallet,
           paid_instapay: splits.instapay,
+        paid_method5: splits.method5 || 0,
+        paid_method6: splits.method6 || 0,
           payment_method: primaryMethod
         })
         .select()
@@ -3538,6 +4380,7 @@ setupRealtime: () => {
     const { data, error } = await supabase.from('employees').insert(employee).select().single();
     if (error) {
       console.error("Add Employee Error:", error);
+      alert('تعذّر حفظ الموظف:\n' + (error.message || '') + '\n(جرّبي تسجيل الدخول من جديد كأدمن.)');
       return;
     }
     if (data) {
@@ -3569,6 +4412,7 @@ setupRealtime: () => {
     const { data, error } = await supabase.from('employee_transactions').insert(transaction).select().single();
     if (error) {
       console.error("Add Employee Transaction Error:", error);
+      alert('تعذّر حفظ المعاملة (راتب/سلفة):\n' + (error.message || '') + '\n(جرّبي تسجيل الدخول من جديد كأدمن.)');
       return;
     }
     
@@ -3585,9 +4429,11 @@ setupRealtime: () => {
         paid_visa: transaction.paid_visa,
         paid_wallet: transaction.paid_wallet,
         paid_instapay: transaction.paid_instapay,
+        paid_method5: (transaction as any).paid_method5 || 0,
+        paid_method6: (transaction as any).paid_method6 || 0,
         note: note,
         payment_method: transaction.payment_method
-      });
+      } as any);
 
       set((state) => ({ employeeTransactions: [data as EmployeeTransaction, ...state.employeeTransactions] }));
     }
@@ -3768,42 +4614,5 @@ setupRealtime: () => {
     } catch (e) {
       console.error("Error updating cashier note:", e);
     }
-  },
-
-  // تسوية الجرد: تحديث مخزون المنتجات للكمية المجرودة وتسجيل الفروق.
-  adjustStock: async (items, note) => {
-    const state = get();
-    const rows: any[] = [];
-    const updatedProducts = [...state.products];
-    for (const it of items) {
-      const p = state.products.find((x) => x.id === it.product_id);
-      if (!p) continue;
-      const totalStock = Number(p.stock_quantity) || 0;
-      const display = Math.min(Number(p.display_quantity) || 0, totalStock);
-      const warehouse = Math.max(0, totalStock - display);
-      const location = it.location || 'all';
-      // الرصيد المُقارَن والتحديث حسب المخزن الذي يتم جرده.
-      const system = location === 'display' ? display : location === 'warehouse' ? warehouse : totalStock;
-      const counted = Number(it.counted_qty);
-      if (isNaN(counted) || Math.abs(counted - system) < 0.0001) continue; // تجاهل غير المتغيّر
-      const diff = counted - system;
-      const cost = Number(p.average_purchase_price ?? p.purchase_price) || 0;
-
-      let newStock: number, newDisplay: number;
-      if (location === 'display') { newDisplay = counted; newStock = warehouse + counted; }
-      else if (location === 'warehouse') { newStock = display + counted; newDisplay = display; }
-      else { newStock = counted; newDisplay = Math.min(display, counted); }
-
-      const patch: any = { stock_quantity: newStock, display_quantity: newDisplay };
-      const { error } = await supabase.from('products').update(patch).eq('id', it.product_id);
-      if (error) continue;
-      rows.push({ product_id: it.product_id, product_name: p.name, system_qty: system, counted_qty: counted, diff, cost, note: note || null });
-      const idx = updatedProducts.findIndex((x) => x.id === it.product_id);
-      if (idx >= 0) updatedProducts[idx] = { ...updatedProducts[idx], ...patch };
-    }
-    if (rows.length) await supabase.from('stock_adjustments').insert(rows);
-    set({ products: updatedProducts });
-    new BroadcastChannel('cashier-sync').postMessage('sync_products');
-    return rows.length;
   },
 }));

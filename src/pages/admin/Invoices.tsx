@@ -5,23 +5,26 @@ import { normalizeArabic } from '../../utils/textUtils';
 import { calculateInvoiceProfit } from '../../utils/invoiceProfit';
 import { calculateOrderReturnValue } from '../../utils/returns';
 import { escapeHtml } from '../../utils/escapeHtml';
-import { openPrintWindow } from '../../utils/printWindow';
+import { printDocument } from '../../utils/printWindow';
 import * as XLSX from 'xlsx';
 
 import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
+// html2canvas-pro يدعم ألوان oklch() في Tailwind v4 (النسخة الأصلية تفشل معها وتكسر تصدير PDF).
+import html2canvas from 'html2canvas-pro';
 import { EditInvoiceModal } from '../../components/EditInvoiceModal';
 
 export default function Invoices() {
   const { orders, storeSettings, deleteOrder } = useStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [showReturnsOnly, setShowReturnsOnly] = useState(false);
+  const [showExchangeOnly, setShowExchangeOnly] = useState(false);
   const [showDeferredOnly, setShowDeferredOnly] = useState(false);
   const [viewMode, setViewMode] = useState<'active' | 'deleted'>('active');
   const [selectedDay, setSelectedDay] = useState<string>('');
   const [selectedMonth, setSelectedMonth] = useState<string>('all');
   const [selectedYear, setSelectedYear] = useState<string>(new Date().getFullYear().toString());
   const [selectedCashier, setSelectedCashier] = useState<string>('all');
+  const [selectedSalesperson, setSelectedSalesperson] = useState<string>('all');
   const [loading, setLoading] = useState(false);
   const [editingOrder, setEditingOrder] = useState<any | null>(null);
 
@@ -63,16 +66,19 @@ export default function Invoices() {
 
     const itemsHtml = cart.map((item: any, index: number) =>
       `<tr>
-        <td style="padding:10px 4px;border-bottom:1px solid #eee;text-align:center;font-weight:bold;color:#666;">${index + 1}</td>
-        <td style="padding:10px 4px;border-bottom:1px solid #eee;font-weight:900;font-size:14px;">${escapeHtml(item.name)}${item.returned_quantity > 0 ? ` <span style="color:red;font-size:10px;">(مرتجع: ${item.returned_quantity})</span>` : ''}</td>
-        <td style="padding:10px 4px;border-bottom:1px solid #eee;text-align:center;font-weight:bold;">${item.quantity}</td>
-        <td style="padding:10px 4px;border-bottom:1px solid #eee;text-align:center;font-weight:bold;">${item.sale_price.toFixed(2)}</td>
-        <td style="padding:10px 4px;border-bottom:1px solid #eee;text-align:left;font-weight:black;font-size:15px;">${(item.sale_price * item.quantity).toFixed(2)}</td>
+        <td style="text-align:center;">${index + 1}</td>
+        <td style="text-align:right;font-weight:bold;">${escapeHtml(item.name)}${item.returned_quantity > 0 ? ` <span style="color:red;font-size:8px;">(مرتجع: ${item.returned_quantity})</span>` : ''}</td>
+        <td style="text-align:center;">${item.quantity}</td>
+        <td style="text-align:center;">${item.sale_price.toFixed(2)}</td>
+        <td style="text-align:left;font-weight:bold;">${(item.sale_price * item.quantity).toFixed(2)}</td>
       </tr>`
     ).join('');
 
     const invoiceUrl = `${window.location.origin}/view-invoice/${order.id}`;
     const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(invoiceUrl)}`;
+
+    const spNames = ((order as any).salespeople?.length ? (order as any).salespeople.map((s: any) => s.name) : (order.salesperson_name ? [order.salesperson_name] : [])).join('، ');
+    const captainsItem = spNames ? `<div class="info-item"><strong>الكباتن المنفّذون:</strong> <span>${escapeHtml(spNames)}</span></div>` : '';
 
     const customerBlock = order.customer
       ? `<div class="customer-info-grid">
@@ -81,6 +87,7 @@ export default function Invoices() {
             <div class="info-item"><strong>رقم الكارت (ID):</strong> <span dir="ltr">${escapeHtml(order.customer.custom_id || order.customer.id.substring(0, 8) || '—')}</span></div>
             <div class="info-item"><strong>رقم الفاتورة:</strong> <span>#${order.id}</span></div>
             <div class="info-item"><strong>المسؤول:</strong> <span>${escapeHtml(order.cashier_name || '—')}</span></div>
+            ${captainsItem}
             <div class="info-item"><strong>التاريخ:</strong> <span>${printDate}</span></div>
             <div class="info-item" style="grid-column: span 2; border-top: 1px dashed #e2e8f0; padding-top: 4px; margin-top: 2px;">
               <strong>إجمالي المديونية الحالية:</strong> 
@@ -91,6 +98,7 @@ export default function Invoices() {
             <div class="info-item"><strong>اسم العميل:</strong> <span>عميل نقدي</span></div>
             <div class="info-item"><strong>رقم الفاتورة:</strong> <span>#${order.id}</span></div>
             <div class="info-item"><strong>المسؤول:</strong> <span>${escapeHtml(order.cashier_name || '—')}</span></div>
+            ${captainsItem}
             <div class="info-item"><strong>التاريخ:</strong> <span>${printDate}</span></div>
          </div>`;
 
@@ -102,43 +110,43 @@ export default function Invoices() {
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
   *{margin:0;padding:0;box-sizing:border-box;font-family:'Cairo', sans-serif;}
-  body{background:#fff;color:#1e293b;padding:0;margin:0;}
-  .invoice-container{width:148mm;min-height:100mm;margin:0 auto;padding:5mm;position:relative;display:flex;flex-direction:column;gap:5px;}
-  
-  .header-main{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #1e293b;padding-bottom:5px;margin-bottom:5px;}
-  .logo{width:80px;height:80px;object-fit:contain;border-radius:12px;border:1px solid #e2e8f0;padding:2px;background:#fff;}
-  .store-name{font-size:24px;font-weight:900;color:#1e293b;line-height:1.2;}
-  .store-details{font-size:10px;color:#64748b;margin-top:3px;line-height:1.3;font-weight:bold;}
-  .store-info-center{flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;padding:0 10px;}
-  
-  .customer-info-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:5px;background:#f8fafc;padding:8px;border-radius:10px;border:1px solid #e2e8f0;}
-  .info-item{font-size:12px;display:flex;gap:6px;}
-  .info-item strong{color:#64748b;white-space:nowrap;}
-  .info-item span{color:#1e293b;font-weight:700;}
-  
-  .qr-code-container{display:flex;flex-direction:column;align-items:center;gap:3px;}
-  .qr-code-img{width:80px;height:80px;padding:3px;background:#fff;border-radius:10px;border:1px solid #e2e8f0;box-shadow: 0 1px 3px rgba(0,0,0,0.1);}
-  .qr-label{font-size:10px;font-weight:900;color:#1e293b;text-align:center;margin-top:2px;background:#f1f5f9;padding:2px 8px;border-radius:4px;}
+  body{background:#fff;color:#000;margin:0;}
+  .invoice-container{width:72mm;margin:0 auto;padding:2mm 1.5mm;display:flex;flex-direction:column;}
+
+  .header-main{text-align:center;border-bottom:1px dashed #000;padding-bottom:6px;margin-bottom:6px;}
+  .logo{max-height:55px;max-width:62mm;width:auto;object-fit:contain;display:block;margin:0 auto 4px;}
+  .store-name{font-size:17px;font-weight:900;color:#000;line-height:1.2;}
+  .store-details{font-size:9px;color:#333;margin-top:2px;line-height:1.4;font-weight:bold;}
+
+  .customer-info-grid{display:flex;flex-direction:column;gap:2px;margin-bottom:6px;font-size:10px;}
+  .info-item{display:flex;justify-content:space-between;gap:6px;}
+  .info-item strong{color:#444;white-space:nowrap;}
+  .info-item span{color:#000;font-weight:700;}
 
   table{width:100%;border-collapse:collapse;margin-bottom:5px;}
-  thead th{background:#f1f5f9;color:#475569;font-size:12px;padding:8px 6px;text-align:center;border-bottom:2px solid #cbd5e1;}
+  thead th{font-size:9px;padding:4px 1px;border-bottom:1px solid #000;font-weight:900;}
   thead th:nth-child(2){text-align:right;}
   thead th:last-child{text-align:left;}
-  
-  .summary-section{margin-right:auto;width:60%;margin-top:5px;}
-  .summary-row{display:flex;justify-content:space-between;padding:5px 0;font-size:13px;border-bottom:1px solid #f1f5f9;}
-  .summary-row.total{border-top:2px solid #1e293b;border-bottom:none;margin-top:3px;font-size:18px;font-weight:900;color:#1e293b;}
-  
-  .payment-status{margin-top:8px;padding:6px;border-radius:6px;text-align:center;font-weight:bold;font-size:13px;}
-  .status-paid{background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;}
-  .status-debt{background:#fef2f2;color:#dc2626;border:1px solid #fecaca;}
-  
-  .footer{text-align:center;margin-top:15px;padding-top:10px;border-top:1px dashed #cbd5e1;font-size:11px;color:#94a3b8;font-weight:bold;}
-  
+  tbody td{font-size:9px;padding:3px 1px;border-bottom:1px dotted #bbb;vertical-align:top;}
+
+  .summary-section{width:100%;margin-top:4px;}
+  .summary-row{display:flex;justify-content:space-between;padding:2px 0;font-size:10px;}
+  .summary-row.total{border-top:1px solid #000;border-bottom:1px solid #000;margin-top:3px;padding:4px 0;font-size:15px;font-weight:900;color:#000;}
+
+  .payment-status{margin-top:6px;padding:5px;border-radius:5px;text-align:center;font-weight:bold;font-size:11px;}
+  .status-paid{background:#e8f5e9;color:#1b5e20;border:1px solid #a5d6a7;}
+  .status-debt{background:#ffebee;color:#b71c1c;border:1px solid #ef9a9a;}
+
+  .qr-code-container{display:flex;flex-direction:column;align-items:center;gap:2px;margin-top:8px;}
+  .qr-code-img{width:90px;height:90px;}
+  .qr-label{font-size:9px;font-weight:900;color:#000;}
+
+  .footer{text-align:center;margin-top:8px;padding-top:6px;border-top:1px dashed #000;font-size:9px;color:#333;font-weight:bold;}
+
   @media print{
-    @page{size:A5;margin:0;}
-    body{-webkit-print-color-adjust:exact;}
-    .invoice-container{width:148mm;height:auto;padding:5mm;}
+    @page{size:72mm auto;margin:0;}
+    body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+    .invoice-container{width:72mm;padding:2mm 1.5mm;}
   }
 </style>
 </head>
@@ -146,19 +154,11 @@ export default function Invoices() {
 <div class="invoice-container">
   <div class="header-main">
     <img class="logo" src="${escapeHtml(storeSettings.logo)}" onerror="this.style.display='none'" />
-
-    <div class="store-info-center">
-      <div class="store-name">${escapeHtml(storeSettings.name)}</div>
-      <div class="store-details">
-        ${storeSettings.address ? `📍 ${escapeHtml(storeSettings.address)}<br/>` : ''}
-        ${storeSettings.phone ? `📞 ${escapeHtml(storeSettings.phone)}` : ''}
-        ${storeSettings.phone2 ? ` | ${escapeHtml(storeSettings.phone2)}` : ''}
-      </div>
-    </div>
-
-    <div class="qr-code-container">
-      <img class="qr-code-img" src="${qrCodeUrl}" alt="QR Code" />
-      <div class="qr-label">تفاصيل الفاتورة</div>
+    <div class="store-name">${escapeHtml(storeSettings.name)}</div>
+    <div class="store-details">
+      ${storeSettings.address ? `📍 ${escapeHtml(storeSettings.address)}<br/>` : ''}
+      ${storeSettings.phone ? `📞 ${escapeHtml(storeSettings.phone)}` : ''}
+      ${storeSettings.phone2 ? ` | ${escapeHtml(storeSettings.phone2)}` : ''}
     </div>
   </div>
 
@@ -202,12 +202,17 @@ export default function Invoices() {
     </div>
   </div>
 
+  <div class="qr-code-container">
+    <img class="qr-code-img" src="${qrCodeUrl}" alt="QR Code" />
+    <div class="qr-label">امسح الكود لعرض الفاتورة</div>
+  </div>
+
   <div class="footer">شكراً لثقتكم بنا - ${escapeHtml(storeSettings.name)} ترحب بكم دائماً</div>
 </div>
 <script>window.onload=()=>{setTimeout(()=>{window.print();window.onafterprint=()=>window.close();},500);}</script>
 </body></html>`;
 
-    openPrintWindow(html);
+    void printDocument('invoice', html);
   };
 
   const handleSendWhatsApp = (order: any) => {
@@ -273,6 +278,13 @@ export default function Invoices() {
       if (o.cashier_name) c.add(o.cashier_name);
     });
     return Array.from(c).sort();
+  }, [visibleOrders]);
+
+  // Extract unique salespeople from orders
+  const uniqueSalespeople = useMemo(() => {
+    const s = new Set<string>();
+    visibleOrders.forEach(o => { if ((o as any).salesperson_name) s.add((o as any).salesperson_name); });
+    return Array.from(s).sort();
   }, [visibleOrders]);
 
   const handleDeleteOrder = async (order: any) => {
@@ -380,6 +392,7 @@ export default function Invoices() {
       const matchesMonth = selectedMonth === 'all' || (orderDate.getMonth() + 1).toString() === selectedMonth;
       const matchesYear = selectedYear === 'all' || orderDate.getFullYear().toString() === selectedYear;
       const matchesReturns = showReturnsOnly ? o.items.some(i => i.returned_quantity > 0) : true;
+      const matchesExchange = showExchangeOnly ? !!(o as any).exchange_data : true;
       const matchesDeferred = showDeferredOnly ? (o.type !== 'payment' && (o.total - (o.paid_amount || 0)) > 0.009) : true;
 
       const searchStr = searchQuery.toLowerCase();
@@ -389,10 +402,13 @@ export default function Invoices() {
         (o.customer?.phone || '').includes(searchStr);
 
       const matchesCashier = selectedCashier === 'all' || o.cashier_name === selectedCashier;
+      const matchesSalesperson = selectedSalesperson === 'all' || (o as any).salesperson_name === selectedSalesperson;
 
-      return matchesDay && matchesMonth && matchesYear && matchesReturns && matchesDeferred && matchesSearch && matchesCashier;
+      return matchesDay && matchesMonth && matchesYear && matchesReturns && matchesExchange && matchesDeferred && matchesSearch && matchesCashier && matchesSalesperson;
     });
-  }, [visibleOrders, searchQuery, showReturnsOnly, showDeferredOnly, selectedDay, selectedMonth, selectedYear, selectedCashier]);
+  }, [visibleOrders, searchQuery, showReturnsOnly, showExchangeOnly, showDeferredOnly, selectedDay, selectedMonth, selectedYear, selectedCashier, selectedSalesperson]);
+
+  const exchangeInvoicesCount = useMemo(() => visibleOrders.filter(o => (o as any).exchange_data).length, [visibleOrders]);
 
   const totalInvoiceProfit = useMemo(() => {
     return filteredOrders.reduce((sum, order) => sum + calculateInvoiceProfit(order), 0);
@@ -404,6 +420,21 @@ export default function Invoices() {
 
   const deferredInvoicesCount = useMemo(() => {
     return filteredOrders.filter(o => o.type !== 'payment' && (o.total - (o.paid_amount || 0)) > 0.009).length;
+  }, [filteredOrders]);
+
+  // تقرير مبيعات/أرباح كل مسؤول مبيعات في الفترة المفلترة (كشف عمولة)
+  const salespersonReport = useMemo(() => {
+    const map = new Map<string, { name: string; count: number; sales: number; profit: number }>();
+    filteredOrders.forEach((o) => {
+      const name = (o as any).salesperson_name;
+      if (!name || o.type === 'payment' || o.is_deleted) return;
+      const cur = map.get(name) || { name, count: 0, sales: 0, profit: 0 };
+      cur.count += 1;
+      cur.sales += Number(o.total) || 0;
+      cur.profit += calculateInvoiceProfit(o);
+      map.set(name, cur);
+    });
+    return Array.from(map.values()).sort((a, b) => b.sales - a.sales);
   }, [filteredOrders]);
 
   return (
@@ -496,6 +527,16 @@ export default function Invoices() {
               <option value="all">كل المحاسبين</option>
               {uniqueCashiers.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
+
+            <select
+              value={selectedSalesperson}
+              onChange={e => setSelectedSalesperson(e.target.value)}
+              style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
+              className="bg-white border border-slate-200 rounded-xl p-2.5 text-sm focus:ring-2 outline-none"
+            >
+              <option value="all">كل مسؤولي المبيعات</option>
+              {uniqueSalespeople.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
           </div>
         </div>
 
@@ -560,6 +601,22 @@ export default function Invoices() {
               </button>
               <button
                 type="button"
+                onClick={() => setShowExchangeOnly((current) => !current)}
+                className={`rounded-2xl border p-4 text-right transition-all ${
+                  showExchangeOnly
+                    ? 'border-amber-300 bg-amber-100 text-amber-800 shadow-sm ring-2 ring-amber-200'
+                    : 'border-amber-100 bg-amber-50 text-amber-700 hover:border-amber-200 hover:bg-amber-100/60'
+                }`}
+                title={showExchangeOnly ? 'عرض كل الفواتير' : 'إظهار فواتير الاستبدال فقط'}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[11px] font-black text-amber-600">فواتير استبدال</p>
+                  <ArrowRightLeft size={18} />
+                </div>
+                <p className="text-2xl font-black mt-2">{exchangeInvoicesCount}</p>
+              </button>
+              <button
+                type="button"
                 onClick={() => setShowDeferredOnly((current) => !current)}
                 className={`rounded-2xl border p-4 text-right transition-all ${
                   showDeferredOnly
@@ -577,6 +634,37 @@ export default function Invoices() {
             </div>
         </div>
 
+        {salespersonReport.length > 0 && (
+          <div className="bg-white rounded-2xl border border-purple-100 shadow-sm mb-6 overflow-hidden">
+            <div className="px-5 py-3 bg-purple-50 border-b border-purple-100 flex items-center gap-2">
+              <User size={18} className="text-purple-600" />
+              <h3 className="font-black text-purple-800">كشف مبيعات وأرباح مسؤولي المبيعات (الفترة المعروضة)</h3>
+            </div>
+            <div className="overflow-x-auto">
+            <table className="w-full text-right text-sm">
+              <thead className="bg-slate-50 text-slate-400 font-bold">
+                <tr>
+                  <th className="p-3">مسؤول المبيعات</th>
+                  <th className="p-3 text-center">عدد الفواتير</th>
+                  <th className="p-3 text-center">إجمالي المبيعات</th>
+                  <th className="p-3 text-center text-emerald-600">إجمالي الأرباح</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {salespersonReport.map((r) => (
+                  <tr key={r.name} className="hover:bg-slate-50">
+                    <td className="p-3 font-black text-slate-800">{r.name}</td>
+                    <td className="p-3 text-center font-bold text-slate-600">{r.count}</td>
+                    <td className="p-3 text-center font-black text-indigo-600">{r.sales.toFixed(2)} {storeSettings.currency}</td>
+                    <td className="p-3 text-center font-black text-emerald-600">{r.profit.toFixed(2)} {storeSettings.currency}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </div>
+          </div>
+        )}
+
         <div className="flex-1 overflow-x-auto">
           <table className="w-full text-right text-sm">
             <thead className="bg-slate-50 border-b border-slate-100 text-slate-400 font-medium">
@@ -585,6 +673,7 @@ export default function Invoices() {
                 <th className="p-4">بيانات العميل</th>
                 <th className="p-4">التاريخ والوقت</th>
                 <th className="p-4 text-center">المسؤول</th>
+                <th className="p-4 text-center">مسؤول المبيعات</th>
                 <th className="p-4">تفاصيل المنتجات</th>
                 <th className="p-4 text-center border-x border-slate-100 bg-slate-100/50">الإجمالي</th>
                 <th className="p-4 text-center text-emerald-600 bg-emerald-50/50">الربح</th>
@@ -598,7 +687,7 @@ export default function Invoices() {
             <tbody className="divide-y divide-slate-100 text-slate-700">
               {filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="p-12 text-center text-slate-400 text-lg font-bold">
+                  <td colSpan={13} className="p-12 text-center text-slate-400 text-lg font-bold">
                     لا يوجد فواتير تطابق بحثك حالياً.
                   </td>
                 </tr>
@@ -638,7 +727,18 @@ export default function Invoices() {
                         )}
                       </td>
                       <td className="p-4 text-slate-500">{new Date(order.date).toLocaleString('ar-SA')}</td>
-                      <td className="p-4 text-center font-bold text-indigo-600">{order.cashier_name || 'غير معروف'}</td>
+                      <td className="p-4 text-center font-bold text-indigo-600">
+                        {order.cashier_name || 'غير معروف'}
+                        {(() => {
+                          const sps = (order as any).salespeople as { id: string; name: string }[] | undefined;
+                          const names = (sps?.length ? sps.map((s) => s.name) : ((order as any).salesperson_name ? [(order as any).salesperson_name] : [])).join('، ');
+                          return names ? <div className="text-[10px] font-bold text-purple-500 mt-0.5">كباتن: {names}</div> : null;
+                        })()}
+                      </td>
+                      <td className="p-4 text-center font-bold text-purple-600">
+                        {(order as any).salesperson_name || '—'}
+                        {(order as any).exchange_data && <div className="mt-1"><span className="text-[10px] font-black bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">↺ استبدال</span></div>}
+                      </td>
                       <td className="p-4 text-right">
                         {order.is_deleted ? (
                           <span className="inline-flex items-center gap-1 bg-red-100 text-red-600 px-3 py-1 rounded-lg text-xs font-bold">

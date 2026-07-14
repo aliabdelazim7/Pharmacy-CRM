@@ -3,7 +3,8 @@ import { useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import type { Order, StoreSettings } from '../store/useStore';
 import { CheckCircle2, Printer, Download, Phone, User, MapPin } from 'lucide-react';
-import html2canvas from 'html2canvas';
+// html2canvas-pro يدعم ألوان oklch() في Tailwind v4 (النسخة الأصلية تفشل معها).
+import html2canvas from 'html2canvas-pro';
 import { calculateOrderReturnValue } from '../utils/returns';
 
 
@@ -53,6 +54,8 @@ export default function PublicInvoice() {
             name: i.product_name || i.products?.name || 'منتج غير معروف',
             quantity: i.quantity,
             sale_price: i.sale_price,
+            regular_price: i.products?.sale_price,
+            discount_price: i.products?.discount_price,
             returned_quantity: i.returned_quantity || 0,
           }));
 
@@ -109,6 +112,8 @@ export default function PublicInvoice() {
             date: o.created_at,
             items,
             cashier_name: o.cashier_name,
+            salesperson_name: o.salesperson_name,
+            salespeople: o.salespeople || [],
             notes: o.notes,
             coupon_code: o.coupon_code,
             discount_amount: o.discount || 0,
@@ -330,7 +335,7 @@ export default function PublicInvoice() {
             <div className="flex flex-col sm:flex-row items-center sm:items-start gap-4 text-center sm:text-right">
               {settings.logo && (
                 <div className="bg-white p-1 rounded-2xl border border-slate-200 shadow-sm shrink-0">
-                  <img src={settings.logo} alt="Logo" className="w-16 h-16 object-contain animate-fade-in" />
+                  <img src={settings.logo} alt="Logo" className="h-16 w-auto max-w-[220px] object-contain animate-fade-in" />
                 </div>
               )}
               <div className="flex flex-col justify-center">
@@ -365,6 +370,16 @@ export default function PublicInvoice() {
                   <span>المحاسب: {order.cashier_name}</span>
                 </div>
               )}
+              {(() => {
+                const sps = (order as any).salespeople as { id: string; name: string }[] | undefined;
+                const names = (sps?.length ? sps.map((s) => s.name) : ((order as any).salesperson_name ? [(order as any).salesperson_name] : [])).join('، ');
+                return names ? (
+                  <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-black text-purple-600 bg-purple-50 px-3 py-1.5 rounded-full border border-purple-100 shadow-sm">
+                    <User size={12} className="opacity-70" />
+                    <span>الكباتن المنفّذون: {names}</span>
+                  </div>
+                ) : null;
+              })()}
             </div>
           </div>
 
@@ -435,7 +450,11 @@ export default function PublicInvoice() {
                     <td className="p-4 text-center text-slate-400 font-bold text-xs">{idx + 1}</td>
                     <td className="p-4 font-black text-slate-800 text-sm">{item.name}</td>
                     {!isPayment && <td className="p-4 text-center font-black text-slate-800">{item.quantity}</td>}
-                    <td className="p-4 text-center font-bold text-slate-600 text-xs">{item.sale_price.toFixed(2)}</td>
+                    <td className="p-4 text-center font-bold text-slate-600 text-xs">
+                      {(item as any).regular_price && ((item as any).discount_price || 0) > 0 && Math.abs(item.sale_price - ((item as any).discount_price || 0)) < 0.01 && (item as any).regular_price > item.sale_price ? (
+                        <span className="inline-flex items-center gap-1"><span className="line-through text-slate-400">{(item as any).regular_price.toFixed(2)}</span><span className="text-emerald-600 font-black">{item.sale_price.toFixed(2)}</span></span>
+                      ) : item.sale_price.toFixed(2)}
+                    </td>
                     <td className="p-4 text-left font-black text-slate-900 text-sm">{ (item.quantity * item.sale_price).toFixed(2) }</td>
                   </tr>
                 ))}

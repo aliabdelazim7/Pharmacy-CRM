@@ -38,6 +38,11 @@ const TYPE_LABELS = {
   transfer: 'تحويل داخلي بين وسائل الدفع',
   cashier_expense: 'مصروف من الكاشير',
   cashier_income: 'إيراد من الكاشير',
+  manager_withdrawal: 'سحب باسم المدير',
+  partner_withdraw: 'سحب شريك',
+  partner_deposit: 'إيداع شريك',
+  savings_in: 'تحويل لخزنة الادخار',
+  savings_out: 'تحويل من خزنة الادخار',
 };
 
 function line(label, value) {
@@ -100,6 +105,7 @@ function formatMessage(payload) {
   const lines = baseLines(payload);
 
   if (payload.invoiceId) lines.push(line('رقم الفاتورة', `#${payload.invoiceId}`));
+  if (payload.salesperson) lines.push(line('مسؤول المبيعات', payload.salesperson));
   if (payload.customer) lines.push(line('العميل', payload.customer));
   if (payload.supplier) lines.push(line('المورد', payload.supplier));
   if (payload.lender) lines.push(line('صاحب السلفة / الجمعية', payload.lender));
@@ -196,18 +202,24 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, skipped: true, reason: 'No alertable data' });
     }
 
-    const telegramRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: false,
-      }),
-    });
-
-    const result = await telegramRes.json();
-    return res.status(telegramRes.ok ? 200 : 502).json(result);
+    // TELEGRAM_CHAT_ID may be a comma-separated list to notify several people.
+    const chatIds = String(chatId).split(',').map((s) => s.trim()).filter(Boolean);
+    let ok = true;
+    const results = [];
+    for (const cid of chatIds) {
+      const telegramRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: cid,
+          text,
+          disable_web_page_preview: false,
+        }),
+      });
+      if (!telegramRes.ok) ok = false;
+      results.push(await telegramRes.json());
+    }
+    return res.status(ok ? 200 : 502).json({ ok, results });
   } catch (error) {
     return res.status(500).json({ ok: false, error: String(error) });
   }

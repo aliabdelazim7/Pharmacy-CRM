@@ -1,18 +1,54 @@
 import { useState, useMemo } from 'react';
+import * as XLSX from 'xlsx';
 import { useStore, type Employee, type EmployeeTransaction, type EmployeeLeave } from '../../store/useStore';
-import { 
-  Users, Plus, Trash2, Edit3, Search, X, 
+import {
+  Users, Plus, Trash2, Edit3, Search, X,
   Wallet, Landmark, CreditCard, Zap, Phone,
-  DollarSign, Briefcase, ArrowRight, FileText, CalendarDays, Gift, UserCheck, UserX
+  DollarSign, Briefcase, ArrowRight, FileText, CalendarDays, Gift, UserCheck, UserX, Download
 } from 'lucide-react';
+import { activePaymentKeys, payLabelOf, primaryMethod as primaryMethod_ } from '../../utils/paymentMethods';
 
 export default function Employees() {
-  const { 
-    employees, employeeTransactions, employeeLeaves, storeSettings, 
+  const {
+    employees, employeeTransactions, employeeLeaves, storeSettings, orders, cashiers,
     addEmployee, updateEmployee, addEmployeeTransaction,
     updateEmployeeTransaction, deleteEmployeeTransaction,
     addEmployeeLeave, updateEmployeeLeave, deleteEmployeeLeave
   } = useStore();
+  const payKeys = activePaymentKeys(storeSettings as any);
+
+  // إجمالي مبيعات محاسب (المرتبط بموظف) في شهر معيّن (YYYY-MM).
+  // مبيعات الموظف كبائع (salesperson) لهذا الشهر + الأرباح المحققة — لحساب العمولة.
+  // يشمل الفواتير اللي اتسجّل عليها كبائع، + (لو محاسب) فواتيره اللي ملهاش بائع محدد.
+  const employeeMonthStats = (emp: any, month: string) => {
+    const cashier = emp?.cashier_id ? cashiers.find((c: any) => c.id === emp.cashier_id) : null;
+    const cname = cashier?.name || emp?.name;
+    const orderProfit = (o: any) => (o.items || []).reduce((ps: number, it: any) => {
+      const qty = (Number(it.quantity) || 0) - (Number(it.returned_quantity) || 0);
+      const cost = Number(it.average_purchase_price ?? it.purchase_price) || 0;
+      return ps + ((Number(it.sale_price) || 0) - cost) * qty;
+    }, 0);
+    // عند تعدد الكباتن على الفاتورة تُقسَّم المبيعات والأرباح بينهم بالتساوي.
+    let sales = 0, profit = 0;
+    orders
+      .filter((o: any) => !o.is_deleted && o.type === 'sale' && String(o.date || '').slice(0, 7) === month)
+      .forEach((o: any) => {
+        const sps: any[] = Array.isArray(o.salespeople) && o.salespeople.length
+          ? o.salespeople
+          : (o.salesperson_id ? [{ id: o.salesperson_id, name: o.salesperson_name }] : []);
+        let share = 0;
+        if (sps.length) {
+          if (emp?.id && sps.some((s) => s.id === emp.id)) share = 1 / sps.length;
+        } else if (emp?.cashier_id && o.cashier_name === cname) {
+          share = 1; // فاتورة بلا كابتن محدد → تُنسب للكاشير المرتبط بالموظف
+        }
+        if (share > 0) {
+          sales += (Number(o.total) || 0) * share;
+          profit += orderProfit(o) * share;
+        }
+      });
+    return { sales, profit };
+  };
 
   const [activeTab, setActiveTab] = useState<'employees' | 'transactions'>('employees');
   const [searchTerm, setSearchTerm] = useState('');
@@ -29,6 +65,7 @@ export default function Employees() {
   const [profileTimeFilter, setProfileTimeFilter] = useState<'month' | 'week' | 'all' | 'custom_month' | 'custom_year'>('month');
   const [profileCustomMonth, setProfileCustomMonth] = useState<string>(new Date().toISOString().slice(0, 7));
   const [profileCustomYear, setProfileCustomYear] = useState<string>(new Date().getFullYear().toString());
+  const [payrollMonth, setPayrollMonth] = useState<string>(new Date().toISOString().slice(0, 7));
 
   const [empFormData, setEmpFormData] = useState({
     name: '',
@@ -41,15 +78,18 @@ export default function Employees() {
     is_active: true
   });
 
-  const [transFormData, setTransFormData] = useState({
+  const [transFormData, setTransFormData] = useState<Record<string, string>>({
     amount: '',
     paid_cash: '',
     paid_visa: '',
     paid_wallet: '',
     paid_instapay: '',
+    paid_method5: '',
+    paid_method6: '',
     month: new Date().toISOString().slice(0, 7),
     dedDays: '',
     dedAmount: '',
+    commissionRate: '',
     note: ''
   });
 
@@ -182,6 +222,32 @@ export default function Employees() {
     return { salary: emp.monthly_salary, advances, paidSalary, deductions: deductions + leaveDeductions, incentives, leaveDeductions, remaining };
   };
 
+  // تصدير كشف الرواتب للشهر المحدد (Excel)
+  const exportPayroll = () => {
+    const rows = employees.map((emp) => {
+      const s = getEmployeeMonthStats(emp.id, payrollMonth);
+      const sales = employeeMonthStats(emp, payrollMonth);
+      return {
+        'الموظف': emp.name,
+        'الوظيفة': emp.job_title || '',
+        'الراتب الشهري': Number(emp.monthly_salary) || 0,
+        'السلف': s.advances,
+        'الحوافز': s.incentives,
+        'الخصومات': s.deductions,
+        'الراتب المدفوع': s.paidSalary,
+        'المتبقي': s.remaining,
+        'مبيعاته (كبائع)': sales.sales,
+        'أرباحه للشركة': sales.profit,
+        'نسبة العمولة %': Number(emp.commission_rate) || 0,
+      };
+    });
+    if (rows.length === 0) { alert('لا يوجد موظفون'); return; }
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'الرواتب');
+    XLSX.writeFile(wb, `كشف_الرواتب_${payrollMonth}.xlsx`);
+  };
+
   // --- Profile Logic ---
   const profileEmployee = employees.find(e => e.id === selectedProfileId);
   const profileTransactions = useMemo(() => {
@@ -298,9 +364,12 @@ export default function Employees() {
         paid_visa: (transaction.paid_visa || 0).toString(),
         paid_wallet: (transaction.paid_wallet || 0).toString(),
         paid_instapay: (transaction.paid_instapay || 0).toString(),
+        paid_method5: ((transaction as any).paid_method5 || 0).toString(),
+        paid_method6: ((transaction as any).paid_method6 || 0).toString(),
         month: transaction.month,
         dedDays: '',
         dedAmount: (transaction.deductions || 0).toString(),
+        commissionRate: '',
         note: transaction.note || ''
       });
       setShowTransModal(true);
@@ -320,6 +389,7 @@ export default function Employees() {
       month: currentMonth,
       dedDays: '',
       dedAmount: '',
+      commissionRate: (type === 'salary' && emp.commission_rate) ? String(emp.commission_rate) : '',
       note: type === 'salary' ? `راتب شهر ${currentMonth}` : type === 'incentive' ? `حافز شهر ${currentMonth}` : ''
     });
     setShowTransModal(true);
@@ -338,31 +408,25 @@ export default function Employees() {
   };
 
   const handleTransSubmit = async () => {
-    const cash = parseFloat(transFormData.paid_cash) || 0;
-    const visa = parseFloat(transFormData.paid_visa) || 0;
-    const wallet = parseFloat(transFormData.paid_wallet) || 0;
-    const insta = parseFloat(transFormData.paid_instapay) || 0;
-    const total = cash + visa + wallet + insta;
+    const split: Record<string, number> = {};
+    payKeys.forEach((k) => { split[k] = parseFloat((transFormData as any)['paid_' + k]) || 0; });
+    const total = payKeys.reduce((s, k) => s + split[k], 0);
 
     if (total <= 0) return alert('يرجى إدخال مبلغ صحيح');
 
-    const paymentMethod = cash >= visa && cash >= wallet && cash >= insta
-      ? 'cash'
-      : visa >= wallet && visa >= insta
-        ? 'visa'
-        : wallet >= insta
-          ? 'wallet'
-          : 'instapay';
+    const paymentMethod = primaryMethod_(split);
 
     const transactionData = {
       employee_id: selectedEmployee!.id,
       amount: total,
       type: transType,
-      payment_method: paymentMethod as 'cash' | 'visa' | 'wallet' | 'instapay',
-      paid_cash: cash,
-      paid_visa: visa,
-      paid_wallet: wallet,
-      paid_instapay: insta,
+      payment_method: paymentMethod as any,
+      paid_cash: split.cash || 0,
+      paid_visa: split.visa || 0,
+      paid_wallet: split.wallet || 0,
+      paid_instapay: split.instapay || 0,
+      paid_method5: split.method5 || 0,
+      paid_method6: split.method6 || 0,
       month: transFormData.month,
       deductions: (parseFloat(transFormData.dedAmount) || 0) + ((parseFloat(transFormData.dedDays) || 0) * (selectedEmployee!.monthly_salary / 30)),
       note: transFormData.note
@@ -491,6 +555,10 @@ export default function Employees() {
               className="bg-slate-50 border border-slate-200 rounded-2xl pr-12 pl-4 py-3 focus:ring-2 focus:ring-indigo-500/20 outline-none font-medium w-64"
             />
           </div>
+          <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-2xl px-3 py-2">
+            <input type="month" value={payrollMonth} onChange={(e) => setPayrollMonth(e.target.value)} className="bg-transparent text-sm font-bold outline-none" />
+            <button onClick={exportPayroll} className="flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-2 rounded-xl text-sm font-bold hover:bg-emerald-700 transition"><Download size={16} /> كشف الرواتب Excel</button>
+          </div>
           <div className="flex gap-1 bg-slate-100 p-1 rounded-2xl">
             {[
               { value: 'all', label: 'الكل' },
@@ -525,7 +593,7 @@ export default function Employees() {
       {selectedProfileId && profileEmployee ? (
         <div className="space-y-6">
           {/* Profile Header */}
-          <div className="flex flex-wrap items-center justify-between gap-4 bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
+          <div className="flex items-center justify-between bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
             <div className="flex items-center gap-4">
               <button 
                 onClick={() => setSelectedProfileId(null)}
@@ -546,7 +614,7 @@ export default function Employees() {
                 <p className="text-slate-500 font-medium">{profileEmployee.job_title || 'بدون مسمى'} • {profileEmployee.phone}</p>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex gap-2">
               <button 
                 onClick={() => handleOpenLeaveModal(profileEmployee)}
                 disabled={!(profileEmployee.is_active ?? true)}
@@ -1216,25 +1284,47 @@ export default function Employees() {
                 </div>
               </div>
 
+              {transType === 'salary' && (() => {
+                const stats = employeeMonthStats(selectedEmployee, transFormData.month);
+                const sales = stats.sales;
+                const rate = parseFloat(transFormData.commissionRate) || 0;
+                const commission = sales * rate / 100;
+                return (
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 space-y-2">
+                    <div className="flex items-center justify-between text-sm font-black text-emerald-800">
+                      <span>عمولة المبيعات</span>
+                      <span>مبيعات الشهر: {sales.toFixed(2)} {storeSettings.currency}</span>
+                    </div>
+                    <div className="text-[11px] font-bold text-emerald-700 -mt-1">الأرباح المحققة للشركة من مبيعاته: {stats.profit.toFixed(2)} {storeSettings.currency}</div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <label className="text-xs font-bold text-slate-600">نسبة العمولة %</label>
+                      <input type="number" min="0" step="0.1" className="w-20 bg-white border border-emerald-200 rounded-lg p-2 text-center font-bold" value={transFormData.commissionRate} onChange={e => setTransFormData({ ...transFormData, commissionRate: e.target.value })} />
+                      <span className="text-sm font-black text-emerald-700">= {commission.toFixed(2)} {storeSettings.currency}</span>
+                      <button type="button" disabled={commission <= 0}
+                        onClick={() => setTransFormData({
+                          ...transFormData,
+                          paid_cash: ((parseFloat(transFormData.paid_cash) || 0) + commission).toFixed(2),
+                          amount: ((parseFloat(transFormData.amount) || 0) + commission).toFixed(2),
+                          note: `${transFormData.note}${transFormData.note ? ' + ' : ''}عمولة مبيعات شهر ${transFormData.month} (${rate}%): ${commission.toFixed(2)}`,
+                        })}
+                        className="mr-auto bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold px-3 py-2 rounded-lg">
+                        + أضف العمولة للراتب
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-slate-500">تُحسب على مبيعات هذا الشهر فقط؛ بعد صرف الشهر تبدأ مبيعات الشهر التالي من الصفر تلقائياً.</p>
+                  </div>
+                );
+              })()}
+
               <div className="space-y-4">
                 <p className="text-sm font-bold text-slate-700 border-b border-slate-100 pb-2">تفاصيل الدفع (طرق الدفع)</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1">كاش</label>
-                    <input type="number" className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 outline-none font-bold" value={transFormData.paid_cash} onChange={e => setTransFormData({...transFormData, paid_cash: e.target.value})} />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1">فيزا</label>
-                    <input type="number" className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 outline-none font-bold" value={transFormData.paid_visa} onChange={e => setTransFormData({...transFormData, paid_visa: e.target.value})} />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1">محفظة</label>
-                    <input type="number" className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 outline-none font-bold" value={transFormData.paid_wallet} onChange={e => setTransFormData({...transFormData, paid_wallet: e.target.value})} />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1">انستا باي</label>
-                    <input type="number" className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 outline-none font-bold" value={transFormData.paid_instapay} onChange={e => setTransFormData({...transFormData, paid_instapay: e.target.value})} />
-                  </div>
+                  {payKeys.map((k) => (
+                    <div key={k}>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-1">{payLabelOf(storeSettings as any, k)}</label>
+                      <input type="number" className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 outline-none font-bold" value={(transFormData as any)['paid_' + k] || ''} onChange={e => setTransFormData({ ...transFormData, ['paid_' + k]: e.target.value })} />
+                    </div>
+                  ))}
                 </div>
               </div>
 
@@ -1278,7 +1368,7 @@ export default function Employees() {
                 const unpaidDays = leaveFormData.leave_type === 'paid' ? daysCount - paidDays : daysCount;
                 const deduction = unpaidDays * (selectedEmployee.monthly_salary / 30);
                 return (
-                  <div className="bg-sky-50 rounded-2xl p-4 border border-sky-100 grid grid-cols-3 gap-3">
+                  <div className="bg-sky-50 rounded-2xl p-4 border border-sky-100 grid grid-cols-2 md:grid-cols-3 gap-3">
                     <div>
                       <p className="text-[10px] font-bold text-sky-500">الرصيد المتبقي</p>
                       <p className="text-lg font-black text-sky-700">{balance.remaining} يوم</p>

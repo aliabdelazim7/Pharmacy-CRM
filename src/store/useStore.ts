@@ -11,6 +11,8 @@ export interface Product {
   average_purchase_price: number;
   sale_price: number;
   stock_quantity: number;
+  display_quantity?: number; // الكمية المعروضة في المحل
+  season?: string; // الموسم: 'summer' | 'winter' | 'annual'
   has_strips?: boolean; // هل الدواء حبوب يباع بالعلبة/الشريط؟
   strips_per_box?: number; // عدد الشرائط بالعلبة
   strip_sale_price?: number; // سعر الشريط

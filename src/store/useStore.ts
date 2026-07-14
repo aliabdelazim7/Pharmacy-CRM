@@ -13,6 +13,17 @@ function priceForType(product: any, type: string): number {
   return (product.discount_price && product.discount_price > 0) ? product.discount_price : product.sale_price;
 }
 
+// Cost of one sold unit. Stock/cost are kept per BOX, so when a line is sold as
+// a strip the box cost must be divided by strips-per-box — otherwise a strip's
+// COGS/profit is computed against a whole box's cost (huge false loss).
+export function lineUnitCost(item: any): number {
+  const boxCost = item.average_purchase_price || item.purchase_price || 0;
+  if (item.unit === 'شريط' && item.strips_per_box && item.strips_per_box > 0) {
+    return boxCost / item.strips_per_box;
+  }
+  return boxCost;
+}
+
 // Creates/updates the Supabase Auth account for a cashier via the server
 // endpoint (which holds the service-role key), so a cashier added from the
 // admin panel can log in immediately. Best-effort: in local dev (no /api) or on
@@ -1022,10 +1033,14 @@ export const useStore = create<CashierStore>((set, get) => ({
             sale_price: i.sale_price as number,
             stock_quantity: (prod.stock_quantity as number) ?? 0,
             category_id: (prod.category_id as string) ?? '',
-            unit: (prod.unit as string) ?? 'قطعة',
+            strips_per_box: (prod.strips_per_box as number) ?? 1,
             quantity: i.quantity as number,
             returned_quantity: (i.returned_quantity as number) ?? 0,
             refunded_amount: (i.refunded_amount as number) ?? 0,
+            // Prefer the unit the line was actually SOLD as (box vs strip),
+            // not the product's current default unit — critical for returns
+            // stock restore and box/strip reporting.
+            unit: (i.unit as string) ?? (prod.unit as string) ?? 'قطعة',
           };
         });
         return {
@@ -1296,7 +1311,7 @@ export const useStore = create<CashierStore>((set, get) => ({
           returned_quantity: item.returned_quantity || 0,
           refunded_amount: item.refunded_amount || 0,
           sale_price: item.sale_price,
-          purchase_price: item.average_purchase_price || item.purchase_price || 0,
+          purchase_price: lineUnitCost(item),
           unit: item.unit ?? 'قطعة',
         }));
         const { error: itemsError } = await supabase.from('order_items').insert(itemsPayload);
@@ -1649,7 +1664,7 @@ export const useStore = create<CashierStore>((set, get) => ({
         quantity: item.quantity,
         returned_quantity: 0,
         sale_price: item.sale_price,
-        purchase_price: item.average_purchase_price || item.purchase_price,
+        purchase_price: lineUnitCost(item),
         unit: item.unit ?? 'قطعة',
       }));
       const { error: itemsError } = await supabase.from('order_items').insert(itemsPayload);

@@ -11,18 +11,20 @@ export interface UnitConfig {
   subPerUnit?: number;  // عدد الوحدات الفرعية في الوحدة الأساسية (1000 جرام = 1 كيلو)
 }
 
+// وحدات صيدلية فقط — لا وحدات وزن/حجم/مساحة عامة (كيلو/لتر/متر/كرتونة/شيكارة).
 export const UNIT_OPTIONS: UnitConfig[] = [
-  { value: 'قطعة', label: 'قطعة', fractional: false },
-  { value: 'كيلو', label: 'كيلو (كجم)', fractional: true, subUnit: 'جرام', subPerUnit: 1000 },
-  { value: 'جرام', label: 'جرام', fractional: true },
-  { value: 'لتر', label: 'لتر', fractional: true, subUnit: 'مل', subPerUnit: 1000 },
-  { value: 'مل', label: 'مل', fractional: true },
-  { value: 'متر', label: 'متر', fractional: true, subUnit: 'سم', subPerUnit: 100 },
   { value: 'علبة', label: 'علبة', fractional: false },
   { value: 'شريط', label: 'شريط', fractional: false },
-  { value: 'كرتونة', label: 'كرتونة', fractional: false },
-  { value: 'شيكارة', label: 'شيكارة', fractional: false },
-  { value: 'باكو', label: 'باكو', fractional: false },
+  { value: 'قطعة', label: 'قطعة', fractional: false },
+  { value: 'زجاجة', label: 'زجاجة', fractional: false },
+  { value: 'أنبوبة', label: 'أنبوبة (كريم/مرهم)', fractional: false },
+  { value: 'أمبول', label: 'أمبول', fractional: false },
+  { value: 'فيال', label: 'فيال', fractional: false },
+  { value: 'كيس', label: 'كيس (ساشيه)', fractional: false },
+  { value: 'كبسولة', label: 'كبسولة', fractional: false },
+  { value: 'قرص', label: 'قرص', fractional: false },
+  { value: 'نقط', label: 'نقط', fractional: false },
+  { value: 'بخاخ', label: 'بخاخ', fractional: false },
 ];
 
 const DEFAULT_UNIT: UnitConfig = UNIT_OPTIONS[0];

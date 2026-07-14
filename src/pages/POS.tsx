@@ -1254,7 +1254,11 @@ export default function POS() {
   );
 
   const subtotal = cart.reduce((sum, item) => sum + item.sale_price * item.quantity, 0);
-  const totalCost = cart.reduce((sum, item) => sum + (item.average_purchase_price || item.purchase_price || 0) * item.quantity, 0);
+  const totalCost = cart.reduce((sum, item) => {
+    const boxCost = item.average_purchase_price || item.purchase_price || 0;
+    const unitCost = item.unit === 'شريط' && item.strips_per_box && item.strips_per_box > 0 ? boxCost / item.strips_per_box : boxCost;
+    return sum + unitCost * item.quantity;
+  }, 0);
   const manualDiscount = Math.min(parseFloat(discountStr) || 0, subtotal);
   
   // Coupon Validation and Calculation

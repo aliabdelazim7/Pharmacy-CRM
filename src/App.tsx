@@ -1,34 +1,45 @@
-import { useEffect } from 'react';
+import { useEffect, lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import POS from './pages/POS';
 import Login from './pages/Login';
 import POSLogin from './pages/POSLogin';
-import AdminLayout from './pages/admin/AdminLayout';
-import Overview from './pages/admin/Overview';
-import Inventory from './pages/admin/Inventory';
-import Invoices from './pages/admin/Invoices';
-import Customers from './pages/admin/Customers';
-import WhatsAppCampaigns from './pages/admin/WhatsAppCampaigns';
-import Suppliers from './pages/admin/Suppliers';
-import DeferredAccounts from './pages/admin/DeferredAccounts';
-import Settings from './pages/admin/Settings';
-import Analytics from './pages/admin/Analytics';
-import Finance from './pages/admin/Finance';
-import OfflineInvoices from './pages/admin/OfflineInvoices';
-import Cashiers from './pages/admin/Cashiers';
-import Employees from './pages/admin/Employees';
-import Budget from './pages/admin/Budget';
-import Financing from './pages/admin/Financing';
-import StockAlerts from './pages/admin/StockAlerts';
-import Coupons from './pages/admin/Coupons';
-import Managers from './pages/admin/Managers';
-import Partners from './pages/admin/Partners';
-import Savings from './pages/admin/Savings';
-import StockTake from './pages/admin/StockTake';
-import Reports from './pages/admin/Reports';
-import AdminUsers from './pages/admin/AdminUsers';
-import PublicInvoice from './pages/PublicInvoice';
+// Heavy routes are code-split so cashiers don't download the admin panel and
+// admins don't download the POS screen; each admin page loads on first visit.
+const POS = lazy(() => import('./pages/POS'));
+const AdminLayout = lazy(() => import('./pages/admin/AdminLayout'));
+const Overview = lazy(() => import('./pages/admin/Overview'));
+const Inventory = lazy(() => import('./pages/admin/Inventory'));
+const Invoices = lazy(() => import('./pages/admin/Invoices'));
+const Customers = lazy(() => import('./pages/admin/Customers'));
+const WhatsAppCampaigns = lazy(() => import('./pages/admin/WhatsAppCampaigns'));
+const Suppliers = lazy(() => import('./pages/admin/Suppliers'));
+const DeferredAccounts = lazy(() => import('./pages/admin/DeferredAccounts'));
+const Settings = lazy(() => import('./pages/admin/Settings'));
+const Analytics = lazy(() => import('./pages/admin/Analytics'));
+const Finance = lazy(() => import('./pages/admin/Finance'));
+const OfflineInvoices = lazy(() => import('./pages/admin/OfflineInvoices'));
+const Cashiers = lazy(() => import('./pages/admin/Cashiers'));
+const Employees = lazy(() => import('./pages/admin/Employees'));
+const Budget = lazy(() => import('./pages/admin/Budget'));
+const Financing = lazy(() => import('./pages/admin/Financing'));
+const StockAlerts = lazy(() => import('./pages/admin/StockAlerts'));
+const Coupons = lazy(() => import('./pages/admin/Coupons'));
+const Managers = lazy(() => import('./pages/admin/Managers'));
+const Partners = lazy(() => import('./pages/admin/Partners'));
+const Savings = lazy(() => import('./pages/admin/Savings'));
+const StockTake = lazy(() => import('./pages/admin/StockTake'));
+const Reports = lazy(() => import('./pages/admin/Reports'));
+const AdminUsers = lazy(() => import('./pages/admin/AdminUsers'));
+const PublicInvoice = lazy(() => import('./pages/PublicInvoice'));
 import { useStore } from './store/useStore';
+
+function RouteFallback() {
+  return (
+    <div className="h-screen flex flex-col items-center justify-center bg-slate-50 gap-4">
+      <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+      <p className="text-slate-500 font-bold text-lg">جاري التحميل...</p>
+    </div>
+  );
+}
 
 function ThemeInjector() {
   const { storeSettings } = useStore();
@@ -151,6 +162,7 @@ function App() {
     <>
       <ThemeInjector />
       <Router>
+        <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route 
             path="/" 
@@ -197,6 +209,7 @@ function App() {
           </Route>
           <Route path="/view-invoice/:id" element={<PublicInvoice />} />
         </Routes>
+        </Suspense>
       </Router>
     </>
   );

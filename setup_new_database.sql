@@ -15,6 +15,44 @@
 -- شغّله بالكامل مرة واحدة: Supabase > SQL Editor > New query > Run
 -- ============================================================
 
+-- ============================================================
+-- 0) تصفير قاعدة البيانات بالكامل وتجنب تكرار الجداول القديمة
+-- ============================================================
+drop table if exists public.held_invoices cascade;
+drop table if exists admin_users cascade;
+drop table if exists stock_adjustments cascade;
+drop table if exists savings_transactions cascade;
+drop table if exists partner_transactions cascade;
+drop table if exists partners cascade;
+drop table if exists otp_codes cascade;
+drop table if exists managers cascade;
+drop table if exists production_materials cascade;
+drop table if exists production_orders cascade;
+drop table if exists materials cascade;
+drop table if exists coupons cascade;
+drop table if exists cashier_notes cascade;
+drop table if exists product_suggestions cascade;
+drop table if exists employee_leaves cascade;
+drop table if exists employee_transactions cascade;
+drop table if exists employees cascade;
+drop table if exists cashiers cascade;
+drop table if exists financing_transactions cascade;
+drop table if exists financing_payments cascade;
+drop table if exists financing_accounts cascade;
+drop table if exists expenses cascade;
+drop table if exists order_items cascade;
+drop table if exists invoice_counter cascade;
+drop table if exists orders cascade;
+drop table if exists purchase_items cascade;
+drop table if exists purchase_invoices cascade;
+drop table if exists maintenance_appointments cascade;
+drop table if exists car_subscriptions cascade;
+drop table if exists suppliers cascade;
+drop table if exists customers cascade;
+drop table if exists products cascade;
+drop table if exists categories cascade;
+drop table if exists store_settings cascade;
+
 create extension if not exists pgcrypto;
 create extension if not exists "uuid-ossp";
 

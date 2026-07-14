@@ -273,10 +273,13 @@ export default function POS() {
   const [weightProduct, setWeightProduct] = useState<Product | null>(null);
   const [weightUnitInput, setWeightUnitInput] = useState(''); // الكمية بالوحدة الأساسية
   const [weightSubInput, setWeightSubInput] = useState('');   // الكمية بالوحدة الفرعية (جرام...)
+  const [pharmacyProduct, setPharmacyProduct] = useState<Product | null>(null);
 
   // فتح نافذة الوزن أو الإضافة المباشرة حسب نوع وحدة المنتج
   const handleAddProduct = (product: Product) => {
-    if (isFractionalUnit(product.unit)) {
+    if (product.has_strips) {
+      setPharmacyProduct(product);
+    } else if (isFractionalUnit(product.unit)) {
       setWeightProduct(product);
       setWeightUnitInput('');
       setWeightSubInput('');
@@ -2650,10 +2653,10 @@ export default function POS() {
             </div>
           ) : (
             cart.map((item) => (
-              <div key={item.id} className="bg-white dark:bg-slate-800 p-3 rounded-xl shadow-sm border border-gray-100 dark:border-slate-700 flex flex-col gap-2 relative overflow-hidden group hover:shadow-md transition-shadow">
+              <div key={item.id + '-' + item.unit} className="bg-white dark:bg-slate-800 p-3 rounded-xl shadow-sm border border-gray-100 dark:border-slate-700 flex flex-col gap-2 relative overflow-hidden group hover:shadow-md transition-shadow">
                 <div className="flex justify-between items-start">
                   <h4 className="font-bold text-gray-800 dark:text-gray-100 leading-tight w-4/5 text-sm">{item.name}</h4>
-                  <button onClick={() => removeFromCart(item.id)} aria-label="حذف الصنف" className="text-red-500 hover:text-white hover:bg-red-500 dark:text-red-400 transition-colors bg-red-50 dark:bg-red-900/30 p-2 rounded-lg absolute left-3 top-3 border border-red-100 dark:border-red-900/50 shadow-sm">
+                  <button onClick={() => removeFromCart(item.id, item.unit)} aria-label="حذف الصنف" className="text-red-500 hover:text-white hover:bg-red-500 dark:text-red-400 transition-colors bg-red-50 dark:bg-red-900/30 p-2 rounded-lg absolute left-3 top-3 border border-red-100 dark:border-red-900/50 shadow-sm">
                     <Trash2 size={16} />
                   </button>
                 </div>
@@ -2670,7 +2673,7 @@ export default function POS() {
                             type="number"
                             dir="ltr"
                             value={item.sale_price}
-                            onChange={(e) => updatePrice(item.id, parseFloat(e.target.value) || 0)}
+                            onChange={(e) => updatePrice(item.id, parseFloat(e.target.value) || 0, item.unit)}
                             className="w-16 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 border-none rounded-md px-1.5 py-0.5 text-xs font-black focus:ring-1 focus:ring-indigo-400 transition text-center"
                           />
                         </div>
@@ -2692,11 +2695,11 @@ export default function POS() {
                     </button>
                   ) : (
                     <div className="flex items-center bg-gray-50 dark:bg-slate-700 border border-gray-200 dark:border-slate-600 rounded-lg p-0.5 shadow-inner">
-                      <button onClick={() => updateQuantity(item.id, item.quantity - 1)} className="p-1.5 hover:bg-white dark:hover:bg-slate-600 rounded-md text-gray-600 dark:text-gray-300 transition-colors shadow-sm">
+                      <button onClick={() => updateQuantity(item.id, item.quantity - 1, item.unit)} className="p-1.5 hover:bg-white dark:hover:bg-slate-600 rounded-md text-gray-600 dark:text-gray-300 transition-colors shadow-sm">
                         <Minus size={14} strokeWidth={3} />
                       </button>
                       <span className="w-8 text-center text-sm font-bold dark:text-white">{item.quantity}</span>
-                      <button onClick={() => updateQuantity(item.id, item.quantity + 1)} className="p-1.5 hover:bg-white dark:hover:bg-slate-600 rounded-md text-gray-600 dark:text-gray-300 transition-colors shadow-sm">
+                      <button onClick={() => updateQuantity(item.id, item.quantity + 1, item.unit)} className="p-1.5 hover:bg-white dark:hover:bg-slate-600 rounded-md text-gray-600 dark:text-gray-300 transition-colors shadow-sm">
                         <Plus size={14} strokeWidth={3} />
                       </button>
                     </div>
@@ -3145,6 +3148,69 @@ export default function POS() {
           </div>
         );
       })()}
+
+      {/* ── نافذة اختيار وحدة البيع للدواء (علبة / شريط) ── */}
+      {pharmacyProduct && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[300] flex items-center justify-center p-4" onClick={() => setPharmacyProduct(null)}>
+          <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-100 dark:border-slate-700 animate-in zoom-in-95" onClick={(e) => e.stopPropagation()}>
+            <div className="p-6 border-b border-gray-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 flex justify-between items-center">
+              <div>
+                <h3 className="font-black text-lg text-slate-800 dark:text-white leading-tight">وحدة البيع للدواء</h3>
+                <p className="text-xs text-slate-400 font-bold mt-1">{pharmacyProduct.name}</p>
+              </div>
+              <button onClick={() => setPharmacyProduct(null)} className="text-slate-400 hover:text-slate-600 bg-white dark:bg-slate-700 p-2 rounded-xl border border-slate-200 dark:border-slate-600 shadow-sm"><X size={18} /></button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <button
+                type="button"
+                onClick={() => {
+                  addToCart({
+                    ...pharmacyProduct,
+                    unit: 'علبة'
+                  });
+                  setPharmacyProduct(null);
+                }}
+                className="w-full flex items-center justify-between p-4 rounded-2xl border-2 border-indigo-600 bg-indigo-50/50 dark:bg-indigo-950/20 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition text-right group animate-in slide-in-from-bottom duration-200"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">📦</span>
+                  <div className="text-right">
+                    <span className="block font-black text-slate-800 dark:text-white">علبة كاملة</span>
+                    <span className="block text-xs text-slate-400">الكمية المتاحة: {Math.floor(pharmacyProduct.stock_quantity)} علبة</span>
+                  </div>
+                </div>
+                <div className="text-left">
+                  <span className="block font-black text-indigo-600 dark:text-indigo-400 text-lg">{pharmacyProduct.sale_price.toFixed(2)} {storeSettings.currency}</span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  addToCart({
+                    ...pharmacyProduct,
+                    unit: 'شريط'
+                  });
+                  setPharmacyProduct(null);
+                }}
+                className="w-full flex items-center justify-between p-4 rounded-2xl border-2 border-emerald-600 bg-emerald-50/50 dark:bg-emerald-950/20 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 transition text-right group animate-in slide-in-from-bottom duration-300"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">💊</span>
+                  <div className="text-right">
+                    <span className="block font-black text-slate-800 dark:text-white">شريط (حبوب)</span>
+                    <span className="block text-xs text-slate-400">{pharmacyProduct.strips_per_box} شرائط بالعلبة · المتاح: {Math.floor(pharmacyProduct.stock_quantity * (pharmacyProduct.strips_per_box || 1))} شريط</span>
+                  </div>
+                </div>
+                <div className="text-left">
+                  <span className="block font-black text-emerald-600 dark:text-emerald-400 text-lg">{(pharmacyProduct.strip_sale_price || 0).toFixed(2)} {storeSettings.currency}</span>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Mobile Bottom Navigation (Visible only on small screens) */}
       <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white dark:bg-slate-900 border-t border-gray-200 dark:border-slate-800 shadow-[0_-10px_30px_rgba(0,0,0,0.1)] z-[100] flex items-center justify-around px-2 pb-5 pt-2">

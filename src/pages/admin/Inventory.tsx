@@ -74,7 +74,12 @@ export default function Inventory() {
     stock_quantity: 0,
     display_quantity: 0,
     category_id: categories[0]?.id || '',
-    unit: 'قطعة'
+    unit: 'قطعة',
+    has_strips: false,
+    strips_per_box: 1,
+    strip_sale_price: 0,
+    production_date: '',
+    expiry_date: ''
   });
 
   // الكمية حسب المخزن المختار: الكل = الإجمالي، المعرض = المعروض، المستودع = الباقي.
@@ -183,7 +188,12 @@ export default function Inventory() {
       stock_quantity: product.stock_quantity,
       display_quantity: product.display_quantity || 0,
       category_id: product.category_id,
-      unit: product.unit || 'قطعة'
+      unit: product.unit || 'قطعة',
+      has_strips: product.has_strips || false,
+      strips_per_box: product.strips_per_box || 1,
+      strip_sale_price: product.strip_sale_price || 0,
+      production_date: product.production_date || '',
+      expiry_date: product.expiry_date || ''
     });
     setShowAddModal(true);
   };
@@ -203,13 +213,18 @@ export default function Inventory() {
       stock_quantity: 0,
       display_quantity: 0,
       category_id: categories[0]?.id || '',
-      unit: 'قطعة'
+      unit: 'قطعة',
+      has_strips: false,
+      strips_per_box: 1,
+      strip_sale_price: 0,
+      production_date: '',
+      expiry_date: ''
     });
     setWarehouseQty(0);
     setShowAddModal(true);
   };
 
-  const submitProduct = (e: React.FormEvent) => {
+  const submitProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.name) {
       alert("الرجاء إدخال اسم المنتج.");
@@ -230,7 +245,12 @@ export default function Inventory() {
     }
 
     const serviceMode = formData.type === 'service';
-    let payload = { ...formData, barcode };
+    let payload = {
+      ...formData,
+      barcode,
+      production_date: formData.production_date ? formData.production_date : null,
+      expiry_date: formData.expiry_date ? formData.expiry_date : null,
+    };
 
     // خدمة: بلا سعر شراء وبلا كمية — نعطيها مخزوناً كبيراً حتى لا تنفد أبداً.
     if (serviceMode) {
@@ -243,51 +263,63 @@ export default function Inventory() {
       };
     }
 
-    if (editingProductId) {
-      if (!serviceMode) {
-        // المعروض لا يتجاوز الإجمالي
-        payload = { ...payload, display_quantity: Math.min(Number(formData.display_quantity) || 0, Number(formData.stock_quantity) || 0) };
+    setLoading(true);
+    try {
+      if (editingProductId) {
+        if (!serviceMode) {
+          // المعروض لا يتجاوز الإجمالي
+          payload = { ...payload, display_quantity: Math.min(Number(formData.display_quantity) || 0, Number(formData.stock_quantity) || 0) };
+        }
+        await updateProduct(editingProductId, payload);
+      } else {
+        if (!serviceMode) {
+          // الإجمالي = مستودع + معروض، والمعروض يتسجّل كما هو
+          const display = Number(formData.display_quantity) || 0;
+          payload = { ...payload, stock_quantity: (Number(warehouseQty) || 0) + display, display_quantity: display };
+        }
+        await addProduct(payload);
+        // طباعة ملصقات الباركود بعدد القطع المضافة (لا تُطبع للخدمات)
+        if (!serviceMode && payload.stock_quantity > 0) {
+          printBarcodeLabels({
+            name: payload.name,
+            code: barcode,
+            price: payload.sale_price,
+            discountPrice: payload.discount_price,
+            currency: storeSettings.currency,
+            count: Math.floor(payload.stock_quantity),
+            storeName: storeSettings.name,
+          });
+        }
       }
-      updateProduct(editingProductId, payload);
-    } else {
-      if (!serviceMode) {
-        // الإجمالي = مستودع + معروض، والمعروض يتسجّل كما هو
-        const display = Number(formData.display_quantity) || 0;
-        payload = { ...payload, stock_quantity: (Number(warehouseQty) || 0) + display, display_quantity: display };
-      }
-      addProduct(payload);
-      // طباعة ملصقات الباركود بعدد القطع المضافة (لا تُطبع للخدمات)
-      if (!serviceMode && payload.stock_quantity > 0) {
-        printBarcodeLabels({
-          name: payload.name,
-          code: barcode,
-          price: payload.sale_price,
-          discountPrice: payload.discount_price,
-          currency: storeSettings.currency,
-          count: payload.stock_quantity,
-          storeName: storeSettings.name,
-        });
-      }
-    }
 
-    setShowAddModal(false);
-    setEditingProductId(null);
-    setFormData({
-      name: '',
-      barcode: '',
-      purchase_price: 0,
-      average_purchase_price: 0,
-      sale_price: 0,
-      discount_price: 0,
-      wholesale_price: 0,
-      half_wholesale_price: 0,
-      type: 'product',
-      stock_quantity: 0,
-      display_quantity: 0,
-      category_id: categories[0]?.id || '',
-      unit: 'قطعة'
-    });
-    setWarehouseQty(0);
+      setShowAddModal(false);
+      setEditingProductId(null);
+      setFormData({
+        name: '',
+        barcode: '',
+        purchase_price: 0,
+        average_purchase_price: 0,
+        sale_price: 0,
+        discount_price: 0,
+        wholesale_price: 0,
+        half_wholesale_price: 0,
+        type: 'product',
+        stock_quantity: 0,
+        display_quantity: 0,
+        category_id: categories[0]?.id || '',
+        unit: 'قطعة',
+        has_strips: false,
+        strips_per_box: 1,
+        strip_sale_price: 0,
+        production_date: '',
+        expiry_date: ''
+      });
+      setWarehouseQty(0);
+    } catch (err: any) {
+      alert("حدث خطأ أثناء حفظ المنتج: " + (err.message || err));
+    } finally {
+      setLoading(false);
+    }
   };
 
   const exportExcel = () => {
@@ -574,6 +606,79 @@ export default function Inventory() {
                     ))}
                   </select>
                 </div>
+                {formData.type !== 'service' && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">تاريخ الإنتاج (تاريخ البداية)</label>
+                      <input
+                        type="date"
+                        value={formData.production_date}
+                        onChange={e => setFormData({ ...formData, production_date: e.target.value })}
+                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">تاريخ انتهاء الصلاحية (تاريخ النهاية)</label>
+                      <input
+                        type="date"
+                        value={formData.expiry_date}
+                        onChange={e => setFormData({ ...formData, expiry_date: e.target.value })}
+                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none"
+                      />
+                    </div>
+                    <div className="sm:col-span-2 flex items-center gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                      <input
+                        type="checkbox"
+                        id="has_strips"
+                        checked={formData.has_strips}
+                        onChange={e => {
+                          const checked = e.target.checked;
+                          setFormData({
+                            ...formData,
+                            has_strips: checked,
+                            unit: checked ? 'علبة' : formData.unit
+                          });
+                        }}
+                        className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500 border-slate-300 cursor-pointer"
+                      />
+                      <label htmlFor="has_strips" className="text-sm font-bold text-slate-700 cursor-pointer select-none">يحتوي على شرائط (حبوب)</label>
+                    </div>
+                    {formData.has_strips && (
+                      <>
+                        <div>
+                          <label className="block text-sm font-bold text-slate-700 mb-1">عدد الشرائط في العلبة</label>
+                          <input
+                            type="number"
+                            min="1"
+                            required
+                            value={formData.strips_per_box}
+                            onChange={e => {
+                              const val = parseInt(e.target.value) || 1;
+                              setFormData({
+                                ...formData,
+                                strips_per_box: val,
+                                strip_sale_price: Number((formData.sale_price / val).toFixed(2))
+                              });
+                            }}
+                            className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-bold text-slate-700 mb-1">سعر بيع الشريط الواحد</label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            required
+                            value={formData.strip_sale_price}
+                            onChange={e => setFormData({ ...formData, strip_sale_price: parseFloat(e.target.value) || 0 })}
+                            className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-green-500"
+                          />
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
               </div>
               <div className="pt-4 mt-2 border-t">
                 <button type="submit" style={{ backgroundColor: storeSettings.themeColor }} className="w-full text-white py-4 rounded-xl font-bold transition shadow-lg shrink-0 flex items-center justify-center gap-2">
@@ -726,6 +831,7 @@ export default function Inventory() {
                 <th className="p-4">الباركود</th>
                 <th className="p-4">اسم المنتج</th>
                 <th className="p-4">التصنيف</th>
+                <th className="p-4 text-center">الصلاحية</th>
                 <th className="p-4 text-center">الوحدة</th>
                 <th className="p-4 text-center">سعر الشراء</th>
                 <th className="p-4 text-center">متوسط الشراء</th>
@@ -755,6 +861,19 @@ export default function Inventory() {
                       )}
                     </td>
                     <td className="p-4 text-slate-500">{category}</td>
+                    <td className="p-4 text-center text-xs">
+                      {product.expiry_date ? (
+                        <span className={`font-bold px-2 py-1 rounded-lg ${
+                          new Date(product.expiry_date).getTime() < new Date().getTime()
+                            ? 'bg-red-100 text-red-700 animate-pulse font-bold'
+                            : 'bg-emerald-100 text-emerald-700 font-bold'
+                        }`}>
+                          {product.expiry_date}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
                     <td className="p-4 text-center">
                       <span className="text-xs font-bold bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">{service ? 'خدمة' : getUnitConfig(product.unit).label}</span>
                     </td>

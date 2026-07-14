@@ -140,6 +140,7 @@ export default function Suppliers() {
 
   // Invoice form state
   const [invSupplierId, setInvSupplierId] = useState('');
+  const [invType, setInvType] = useState<'purchase' | 'return'>('purchase');
   const [invPay, setInvPay] = useState<Record<string, string>>({});
   const invPayKeys = activePaymentKeys(storeSettings as any);
   const invPaidTotal = invPayKeys.reduce((s, k) => s + (parseFloat(invPay[k] || '') || 0), 0);
@@ -226,13 +227,15 @@ export default function Suppliers() {
           total: invTotal,
           paid_amount: effectivePaidAmount,
           payment_method: primaryMethod as any,
+          type: invType
         }, items, adjustedSplit as any);
-        alert('تم حفظ الفاتورة بنجاح وتحديث المخزن');
+        alert(invType === 'return' ? 'تم حفظ مرتجع المورد بنجاح وتحديث المخزن' : 'تم حفظ الفاتورة بنجاح وتحديث المخزن');
       }
 
       setShowInvoiceModal(false);
       setEditingPurchaseInvoice(null);
       setInvSupplierId('');
+      setInvType('purchase');
       setInvPay({});
       setInvItems([{ product_id: '', quantity: '1', purchase_price: '' }]);
       setActiveTab('invoices');
@@ -615,16 +618,23 @@ export default function Suppliers() {
                         <FileText size={22} style={{ color: tc }} />
                       </div>
                       <div>
-                        <p className="font-black text-slate-800 text-lg">{inv.invoice_number}</p>
+                        <p className="font-black text-slate-800 text-lg flex items-center gap-2">
+                          {inv.invoice_number}
+                          {inv.type === 'return' && (
+                            <span className="text-[10px] font-black bg-red-100 text-red-700 px-2 py-0.5 rounded-lg animate-pulse">مرتجع</span>
+                          )}
+                        </p>
                         <p className="text-slate-500 text-sm font-medium">{supplier?.name || 'مورد محذوف'}</p>
                         <p className="text-slate-400 text-xs mt-1">{new Date(inv.created_at).toLocaleDateString('ar-SA', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
                       </div>
                     </div>
                     <div className="flex gap-6 items-start">
                       <div className="text-right">
-                        <p className="font-black text-slate-800 text-xl">{inv.total.toLocaleString()} {storeSettings.currency}</p>
+                        <p className={`font-black text-xl ${inv.type === 'return' ? 'text-red-600' : 'text-slate-800'}`}>
+                          {inv.type === 'return' ? '-' : ''}{inv.total.toLocaleString()} {storeSettings.currency}
+                        </p>
                         <p className="text-sm font-bold text-emerald-600 mt-1">مدفوع: {inv.paid_amount.toLocaleString()}</p>
-                        {remaining > 0 && <p className="text-sm font-bold text-red-500">متبقي: {remaining.toLocaleString()}</p>}
+                        {remaining > 0 && inv.type !== 'return' && <p className="text-sm font-bold text-red-500">متبقي: {remaining.toLocaleString()}</p>}
                       </div>
                       <button
                         onClick={() => {
@@ -703,6 +713,23 @@ export default function Suppliers() {
 
             <form onSubmit={handleAddInvoice} className="flex flex-col flex-1 overflow-hidden">
               <div className="p-6 space-y-5 overflow-y-auto flex-1">
+                {/* Invoice Type Selector */}
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">نوع الفاتورة <span className="text-red-500">*</span></label>
+                  <div className="flex gap-2">
+                    {([['purchase', '📥 فاتورة شراء جديدة'], ['return', '📤 مرتجع إلى المورد']] as const).map(([k, label]) => (
+                      <button
+                        type="button"
+                        key={k}
+                        onClick={() => setInvType(k)}
+                        className={`flex-1 py-2.5 rounded-xl font-bold text-sm transition border ${invType === k ? 'bg-indigo-600 text-white border-transparent' : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {/* Supplier Select */}
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-2">المورد <span className="text-red-500">*</span></label>
@@ -814,7 +841,12 @@ export default function Suppliers() {
         const _end = supTo ? (() => { const d = new Date(`${supTo}T00:00:00`); d.setDate(d.getDate() + 1); return d; })() : null;
         const inRange = (dt: any) => { const d = new Date(dt); return (!_start || d >= _start) && (!_end || d < _end); };
         const supplierInvoices = purchaseInvoices.filter(inv => inv.supplier_id === selectedSupplierProfile.id && inRange(inv.created_at));
-        const totalPurchases = supplierInvoices.reduce((sum, inv) => sum + inv.total, 0);
+        const totalPurchases = supplierInvoices.reduce((sum, inv) => {
+          if (inv.type === 'return') {
+            return sum - inv.total;
+          }
+          return sum + inv.total;
+        }, 0);
         const totalPaid = supplierInvoices.reduce((sum, inv) => sum + inv.paid_amount, 0);
         const totalDebt = totalPurchases - totalPaid;
 
@@ -829,10 +861,14 @@ export default function Suppliers() {
               let s = map.get(it.product_id);
               if (!s) { s = { product_id: it.product_id, totalQty: 0, totalCost: 0, lastPrice: 0, lastDate: '' }; map.set(it.product_id, s); }
               const q = Number(it.quantity) || 0;
-              s.totalQty += q;
-              s.totalCost += q * (Number(it.purchase_price) || 0);
-              s.lastPrice = Number(it.purchase_price) || 0;
-              s.lastDate = inv.created_at;
+              const isRet = inv.type === 'return';
+              const factor = isRet ? -1 : 1;
+              s.totalQty += q * factor;
+              s.totalCost += q * factor * (Number(it.purchase_price) || 0);
+              if (!isRet) {
+                s.lastPrice = Number(it.purchase_price) || 0;
+                s.lastDate = inv.created_at;
+              }
             }
           }
           return Array.from(map.values()).map(s => {
@@ -878,7 +914,11 @@ export default function Suppliers() {
           const cur = storeSettings.currency;
           const period = (supFrom || supTo) ? `الفترة: ${supFrom || '...'} ← ${supTo || '...'}` : 'كل الفترات';
           const prodRows = productStats.map((s: any) => `<tr><td>${escapeHtml(s.name)}</td><td>${formatQty(s.totalQty, s.unit)}</td><td>${s.avgPrice.toFixed(2)}</td><td>${s.lastPrice.toFixed(2)}</td><td>${formatQty(s.currentStock, s.unit)}</td><td>${formatQty(s.sold, s.unit)}</td></tr>`).join('');
-          const invRows = [...supplierInvoices].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).map((inv) => `<tr><td>${escapeHtml(String(inv.invoice_number))}</td><td>${new Date(inv.created_at).toLocaleString('ar-EG')}</td><td>${(inv.total || 0).toFixed(2)}</td><td>${(inv.paid_amount || 0).toFixed(2)}</td><td>${((inv.total || 0) - (inv.paid_amount || 0)).toFixed(2)}</td></tr>`).join('');
+          const invRows = [...supplierInvoices].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).map((inv) => {
+            const netTotal = inv.type === 'return' ? -inv.total : inv.total;
+            const netRemaining = netTotal - (inv.paid_amount || 0);
+            return `<tr><td>${escapeHtml(String(inv.invoice_number))}${inv.type === 'return' ? ' <b style="color:red;">(مرتجع)</b>' : ''}</td><td>${new Date(inv.created_at).toLocaleString('ar-EG')}</td><td>${netTotal.toFixed(2)}</td><td>${(inv.paid_amount || 0).toFixed(2)}</td><td>${netRemaining.toFixed(2)}</td></tr>`;
+          }).join('');
           const html = `<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"/><title>كشف حساب مورد - ${escapeHtml(selectedSupplierProfile.name)}</title><style>
             @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
             *{font-family:'Cairo',sans-serif;box-sizing:border-box;} body{padding:12mm;color:#000;}

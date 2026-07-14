@@ -19,6 +19,7 @@ export const UNIT_OPTIONS: UnitConfig[] = [
   { value: 'مل', label: 'مل', fractional: true },
   { value: 'متر', label: 'متر', fractional: true, subUnit: 'سم', subPerUnit: 100 },
   { value: 'علبة', label: 'علبة', fractional: false },
+  { value: 'شريط', label: 'شريط', fractional: false },
   { value: 'كرتونة', label: 'كرتونة', fractional: false },
   { value: 'شيكارة', label: 'شيكارة', fractional: false },
   { value: 'باكو', label: 'باكو', fractional: false },

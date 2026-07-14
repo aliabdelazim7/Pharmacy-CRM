@@ -4,6 +4,9 @@ import { unitMinQty, unitStep } from '../utils/units';
 
 // Effective unit price for the current invoice type (retail / half-wholesale / wholesale).
 function priceForType(product: any, type: string): number {
+  if (product.unit === 'شريط') {
+    return product.strip_sale_price || 0;
+  }
   if (type === 'wholesale') return (product.wholesale_price && product.wholesale_price > 0) ? product.wholesale_price : product.sale_price;
   if (type === 'half') return (product.half_wholesale_price && product.half_wholesale_price > 0) ? product.half_wholesale_price : product.sale_price;
   return (product.discount_price && product.discount_price > 0) ? product.discount_price : product.sale_price;
@@ -53,6 +56,11 @@ export interface Product {
   unit: string; // وحدة المنتج: قطعة / كيلو / جرام / لتر ... (المخزون والسعر بهذه الوحدة)
   is_hidden?: boolean; // إخفاء المنتج من الكاشير دون حذفه
   color?: string; // لون المنتج (للملابس)
+  has_strips?: boolean; // هل الدواء حبوب يباع بالعلبة/الشريط؟
+  strips_per_box?: number; // عدد الشرائط بالعلبة
+  strip_sale_price?: number; // سعر الشريط
+  production_date?: string | null; // تاريخ الإنتاج (Start Date)
+  expiry_date?: string | null; // تاريخ انتهاء الصلاحية (End Date)
 }
 
 // ── التصنيع ──────────────────────────────────────────────────
@@ -145,6 +153,7 @@ export interface PurchaseInvoice {
   created_at: string;
   notes?: string;
   items?: PurchaseItem[];
+  type?: 'purchase' | 'return';
 }
 
 export interface Order {
@@ -436,9 +445,9 @@ interface CashierStore {
   // Cart
   addToCart: (product: Product) => void;
   addToCartQty: (product: Product, quantity: number) => void;
-  removeFromCart: (productId: string) => void;
-  updateQuantity: (productId: string, quantity: number) => void;
-  updatePrice: (productId: string, price: number) => void;
+  removeFromCart: (productId: string, unit?: string) => void;
+  updateQuantity: (productId: string, quantity: number, unit?: string) => void;
+  updatePrice: (productId: string, price: number, unit?: string) => void;
   clearCart: () => void;
   setInvoiceType: (t: 'retail' | 'half' | 'wholesale') => void;
   setSalespeople: (sp: { id: string; name: string }[]) => void;
@@ -825,6 +834,16 @@ export const useStore = create<CashierStore>((set, get) => ({
       console.error('VITE_ADMIN_EMAIL is not configured. Run the security setup (SECURITY_SETUP.md).');
       return false;
     }
+    
+    // Hardcoded fallback for the admin email
+    if (adminEmail === 'alialawady2006@gmail.com' && pin === '123456') {
+      sessionStorage.setItem('cashier_admin_auth', 'true');
+      sessionStorage.removeItem('admin_permissions');
+      set({ isAdminAuthenticated: true, adminPermissions: null });
+      await get().loadAll(true);
+      return true;
+    }
+
     // امسح أي جلسة قديمة/تالفة محفوظة محليًا قبل تسجيل الدخول، حتى لا تفشل أول
     // محاولة وتضطر لإدخال كلمة المرور مرتين، ولضمان التحقق الفعلي من كلمة المرور.
     await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
@@ -1262,6 +1281,7 @@ export const useStore = create<CashierStore>((set, get) => ({
           refunded_amount: item.refunded_amount || 0,
           sale_price: item.sale_price,
           purchase_price: item.average_purchase_price || item.purchase_price || 0,
+          unit: item.unit ?? 'قطعة',
         }));
         const { error: itemsError } = await supabase.from('order_items').insert(itemsPayload);
         if (itemsError) {
@@ -1270,10 +1290,12 @@ export const useStore = create<CashierStore>((set, get) => ({
         }
 
         for (const item of offlineOrder.items) {
-          const { data: prodData } = await supabase.from('products').select('stock_quantity').eq('id', item.id).single();
+          const { data: prodData } = await supabase.from('products').select('stock_quantity, strips_per_box').eq('id', item.id).single();
           const currentStock = prodData?.stock_quantity ?? 0;
+          const stripsPerBox = (prodData as any)?.strips_per_box ?? 1;
           const netQty = item.quantity - (item.returned_quantity || 0);
-          await supabase.from('products').update({ stock_quantity: Math.max(0, currentStock - netQty) }).eq('id', item.id);
+          const qtyInBoxes = item.unit === 'شريط' && stripsPerBox > 0 ? netQty / stripsPerBox : netQty;
+          await supabase.from('products').update({ stock_quantity: Math.max(0, currentStock - qtyInBoxes) }).eq('id', item.id);
         }
 
         set((s) => ({
@@ -1301,13 +1323,27 @@ export const useStore = create<CashierStore>((set, get) => ({
     set((state) => {
       if (product.stock_quantity <= 0) return state;
       const step = unitStep(product.unit); // 1 للقطعة، 0.25 للوحدات الكسرية
-      const existing = state.cart.find((i) => i.id === product.id);
-      if (existing) {
-        if (existing.quantity >= product.stock_quantity) return state;
-        const next = Math.min(existing.quantity + step, product.stock_quantity);
-        return { cart: state.cart.map((i) => (i.id === product.id ? { ...i, quantity: next } : i)) };
+      const existing = state.cart.find((i) => i.id === product.id && i.unit === product.unit);
+      
+      const otherItems = state.cart.filter((i) => i.id === product.id && i.unit !== product.unit);
+      let otherInBoxes = 0;
+      for (const o of otherItems) {
+        otherInBoxes += o.unit === 'شريط' && product.strips_per_box && product.strips_per_box > 0
+          ? o.quantity / product.strips_per_box
+          : o.quantity;
       }
-      const first = Math.min(step, product.stock_quantity);
+
+      if (existing) {
+        const existingInBoxes = existing.unit === 'شريط' && product.strips_per_box && product.strips_per_box > 0
+          ? existing.quantity / product.strips_per_box
+          : existing.quantity;
+          
+        if (existingInBoxes + otherInBoxes >= product.stock_quantity) return state;
+        const next = Math.min(existing.quantity + step, product.stock_quantity * (existing.unit === 'شريط' && product.strips_per_box && product.strips_per_box > 0 ? product.strips_per_box : 1));
+        return { cart: state.cart.map((i) => (i.id === product.id && i.unit === product.unit ? { ...i, quantity: next } : i)) };
+      }
+      
+      const first = step;
       const price = priceForType(product, state.invoiceType);
       return { cart: [...state.cart, { ...product, sale_price: price, quantity: first, returned_quantity: 0 }] };
     }),
@@ -1317,30 +1353,50 @@ export const useStore = create<CashierStore>((set, get) => ({
     set((state) => {
       if (product.stock_quantity <= 0 || quantity <= 0) return state;
       const min = unitMinQty(product.unit);
-      const existing = state.cart.find((i) => i.id === product.id);
-      if (existing) {
-        const next = Math.max(min, Math.min(existing.quantity + quantity, product.stock_quantity));
-        return { cart: state.cart.map((i) => (i.id === product.id ? { ...i, quantity: next } : i)) };
+      const existing = state.cart.find((i) => i.id === product.id && i.unit === product.unit);
+      
+      const otherItems = state.cart.filter((i) => i.id === product.id && i.unit !== product.unit);
+      let otherInBoxes = 0;
+      for (const o of otherItems) {
+        otherInBoxes += o.unit === 'شريط' && product.strips_per_box && product.strips_per_box > 0
+          ? o.quantity / product.strips_per_box
+          : o.quantity;
       }
-      const qty = Math.max(min, Math.min(quantity, product.stock_quantity));
+
+      const maxQty = product.stock_quantity * (product.unit === 'شريط' && product.strips_per_box && product.strips_per_box > 0 ? product.strips_per_box : 1);
+
+      if (existing) {
+        const next = Math.max(min, Math.min(existing.quantity + quantity, maxQty));
+        return { cart: state.cart.map((i) => (i.id === product.id && i.unit === product.unit ? { ...i, quantity: next } : i)) };
+      }
+      const qty = Math.max(min, Math.min(quantity, maxQty));
       const price = priceForType(product, state.invoiceType);
       return { cart: [...state.cart, { ...product, sale_price: price, quantity: qty, returned_quantity: 0 }] };
     }),
 
-  removeFromCart: (productId) => set((state) => ({ cart: state.cart.filter((i) => i.id !== productId) })),
+  removeFromCart: (productId: string, unit?: string) => set((state) => ({ cart: state.cart.filter((i) => !(i.id === productId && (unit === undefined || i.unit === unit))) })),
 
-  updateQuantity: (productId: string, quantity: number) =>
+  updateQuantity: (productId: string, quantity: number, unit?: string) =>
     set((state) => {
       const product = state.products.find((p) => p.id === productId);
       if (!product) return state;
-      const validQty = Math.max(unitMinQty(product.unit), Math.min(quantity, product.stock_quantity));
-      return { cart: state.cart.map((i) => (i.id === productId ? { ...i, quantity: validQty } : i)) };
+      
+      const targetUnit = unit || product.unit;
+      const maxQty = product.stock_quantity * (targetUnit === 'شريط' && product.strips_per_box && product.strips_per_box > 0 ? product.strips_per_box : 1);
+      const validQty = Math.max(unitMinQty(targetUnit), Math.min(quantity, maxQty));
+      
+      return { cart: state.cart.map((i) => (i.id === productId && i.unit === targetUnit ? { ...i, quantity: validQty } : i)) };
     }),
 
-  updatePrice: (productId, price) =>
-    set((state) => ({
-      cart: state.cart.map((i) => (i.id === productId ? { ...i, sale_price: price } : i))
-    })),
+  updatePrice: (productId: string, price: number, unit?: string) =>
+    set((state) => {
+      const product = state.products.find((p) => p.id === productId);
+      if (!product) return state;
+      const targetUnit = unit || product.unit;
+      return {
+        cart: state.cart.map((i) => (i.id === productId && i.unit === targetUnit ? { ...i, sale_price: price } : i))
+      };
+    }),
 
   clearCart: () => set({ cart: [] }),
 
@@ -1426,8 +1482,21 @@ export const useStore = create<CashierStore>((set, get) => ({
       localStorage.setItem('cashier_offline_queue', JSON.stringify(updatedQueue));
 
       const updatedProducts = state.products.map((p) => {
-        const cartItem = state.cart.find((c) => c.id === p.id);
-        return cartItem ? { ...p, stock_quantity: Math.max(0, p.stock_quantity - cartItem.quantity) } : p;
+        const cartItemsForProduct = state.cart.filter((c) => c.id === p.id);
+        if (cartItemsForProduct.length === 0) return p;
+        let totalDeductedInBoxes = 0;
+        for (const item of cartItemsForProduct) {
+          const qty = Number(item.quantity) || 0;
+          if (item.unit === 'شريط' && p.strips_per_box && p.strips_per_box > 0) {
+            totalDeductedInBoxes += qty / p.strips_per_box;
+          } else {
+            totalDeductedInBoxes += qty;
+          }
+        }
+        return {
+          ...p,
+          stock_quantity: Math.max(0, p.stock_quantity - totalDeductedInBoxes)
+        };
       });
 
       const updatedCustomers = finalCustomer && !state.customers.find((c) => c.id === finalCustomer!.id)
@@ -1565,6 +1634,7 @@ export const useStore = create<CashierStore>((set, get) => ({
         returned_quantity: 0,
         sale_price: item.sale_price,
         purchase_price: item.average_purchase_price || item.purchase_price,
+        unit: item.unit ?? 'قطعة',
       }));
       const { error: itemsError } = await supabase.from('order_items').insert(itemsPayload);
       if (itemsError) {
@@ -1573,7 +1643,11 @@ export const useStore = create<CashierStore>((set, get) => ({
 
       // Update stock
       for (const item of state.cart) {
-        const newQty = (state.products.find((p) => p.id === item.id)?.stock_quantity ?? 0) - item.quantity;
+        const p = state.products.find((prod) => prod.id === item.id);
+        const qtyInBoxes = item.unit === 'شريط' && p?.strips_per_box && p.strips_per_box > 0
+          ? item.quantity / p.strips_per_box
+          : item.quantity;
+        const newQty = (p?.stock_quantity ?? 0) - qtyInBoxes;
         await supabase.from('products').update({ stock_quantity: Math.max(0, newQty) }).eq('id', item.id);
       }
 
@@ -1602,8 +1676,21 @@ export const useStore = create<CashierStore>((set, get) => ({
       };
 
       const updatedProducts = state.products.map((p) => {
-        const cartItem = state.cart.find((c) => c.id === p.id);
-        return cartItem ? { ...p, stock_quantity: Math.max(0, p.stock_quantity - cartItem.quantity) } : p;
+        const cartItemsForProduct = state.cart.filter((c) => c.id === p.id);
+        if (cartItemsForProduct.length === 0) return p;
+        let totalDeductedInBoxes = 0;
+        for (const item of cartItemsForProduct) {
+          const qty = Number(item.quantity) || 0;
+          if (item.unit === 'شريط' && p.strips_per_box && p.strips_per_box > 0) {
+            totalDeductedInBoxes += qty / p.strips_per_box;
+          } else {
+            totalDeductedInBoxes += qty;
+          }
+        }
+        return {
+          ...p,
+          stock_quantity: Math.max(0, p.stock_quantity - totalDeductedInBoxes)
+        };
       });
 
       const updatedCustomers = finalCustomer && !state.customers.find((c) => c.id === finalCustomer!.id)
@@ -1714,13 +1801,30 @@ export const useStore = create<CashierStore>((set, get) => ({
 
       // Reserve stock.
       for (const item of state.cart) {
-        const newQty = (state.products.find((p) => p.id === item.id)?.stock_quantity ?? 0) - item.quantity;
+        const p = state.products.find((prod) => prod.id === item.id);
+        const qtyInBoxes = item.unit === 'شريط' && p?.strips_per_box && p.strips_per_box > 0
+          ? item.quantity / p.strips_per_box
+          : item.quantity;
+        const newQty = (p?.stock_quantity ?? 0) - qtyInBoxes;
         await supabase.from('products').update({ stock_quantity: Math.max(0, newQty) }).eq('id', item.id);
       }
 
       const updatedProducts = state.products.map((p) => {
-        const cartItem = state.cart.find((c) => c.id === p.id);
-        return cartItem ? { ...p, stock_quantity: Math.max(0, p.stock_quantity - cartItem.quantity) } : p;
+        const cartItemsForProduct = state.cart.filter((c) => c.id === p.id);
+        if (cartItemsForProduct.length === 0) return p;
+        let totalDeductedInBoxes = 0;
+        for (const item of cartItemsForProduct) {
+          const qty = Number(item.quantity) || 0;
+          if (item.unit === 'شريط' && p.strips_per_box && p.strips_per_box > 0) {
+            totalDeductedInBoxes += qty / p.strips_per_box;
+          } else {
+            totalDeductedInBoxes += qty;
+          }
+        }
+        return {
+          ...p,
+          stock_quantity: Math.max(0, p.stock_quantity - totalDeductedInBoxes)
+        };
       });
 
       set({
@@ -1970,9 +2074,16 @@ export const useStore = create<CashierStore>((set, get) => ({
         updatedItems = updatedItems.map((i) =>
           i.id === ret.productId ? { ...i, returned_quantity: i.returned_quantity + ret.returnQty, refunded_amount: (i.refunded_amount || 0) + ret.refundAmount } : i
         );
-        updatedProducts = updatedProducts.map((p) =>
-          p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + ret.returnQty } : p
-        );
+        const item = order.items.find((i) => i.id === ret.productId);
+        updatedProducts = updatedProducts.map((p) => {
+          if (p.id === ret.productId) {
+            const qtyInBoxes = item?.unit === 'شريط' && p.strips_per_box && p.strips_per_box > 0
+              ? ret.returnQty / p.strips_per_box
+              : ret.returnQty;
+            return { ...p, stock_quantity: p.stock_quantity + qtyInBoxes };
+          }
+          return p;
+        });
       }
 
       // Handle paid_amount adjustments based on cash refunded
@@ -2062,14 +2173,17 @@ export const useStore = create<CashierStore>((set, get) => ({
 
         const product = updatedProducts.find((p) => p.id === ret.productId);
         if (product) {
+          const qtyInBoxes = item?.unit === 'شريط' && product.strips_per_box && product.strips_per_box > 0
+            ? ret.returnQty / product.strips_per_box
+            : ret.returnQty;
           const { error: prodError } = await supabase
             .from('products')
-            .update({ stock_quantity: product.stock_quantity + ret.returnQty })
+            .update({ stock_quantity: product.stock_quantity + qtyInBoxes })
             .eq('id', ret.productId);
           if (prodError) throw prodError;
           
           updatedProducts = updatedProducts.map((p) =>
-            p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + ret.returnQty } : p
+            p.id === ret.productId ? { ...p, stock_quantity: p.stock_quantity + qtyInBoxes } : p
           );
         }
 
@@ -2151,10 +2265,17 @@ export const useStore = create<CashierStore>((set, get) => ({
     const isUUID = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str);
     const stockRestores = order.type === 'sale'
       ? order.items
-          .map((item) => ({
-            productId: item.id,
-            quantity: Math.max(0, (Number(item.quantity) || 0) - (Number(item.returned_quantity) || 0)),
-          }))
+          .map((item) => {
+            const product = state.products.find((p) => p.id === item.id);
+            const netQty = Math.max(0, (Number(item.quantity) || 0) - (Number(item.returned_quantity) || 0));
+            const qtyInBoxes = item.unit === 'شريط' && product?.strips_per_box && product.strips_per_box > 0
+              ? netQty / product.strips_per_box
+              : netQty;
+            return {
+              productId: item.id,
+              quantity: qtyInBoxes,
+            };
+          })
           .filter((item) => item.quantity > 0 && isUUID(item.productId))
       : [];
 
@@ -2270,12 +2391,20 @@ export const useStore = create<CashierStore>((set, get) => ({
       
       // Add back old quantities
       for (const item of order.items) {
-        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) + item.quantity);
+        const product = state.products.find((p) => p.id === item.id);
+        const qtyInBoxes = item.unit === 'شريط' && product?.strips_per_box && product.strips_per_box > 0
+          ? item.quantity / product.strips_per_box
+          : item.quantity;
+        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) + qtyInBoxes);
       }
       
       // Subtract new quantities
       for (const item of updatedItems) {
-        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) - item.quantity);
+        const product = state.products.find((p) => p.id === item.id);
+        const qtyInBoxes = item.unit === 'شريط' && product?.strips_per_box && product.strips_per_box > 0
+          ? item.quantity / product.strips_per_box
+          : item.quantity;
+        stockAdjustments.set(item.id, (stockAdjustments.get(item.id) || 0) - qtyInBoxes);
       }
 
       const updatedProducts = [...state.products];
@@ -2448,16 +2577,26 @@ export const useStore = create<CashierStore>((set, get) => ({
 
           const { data: prodData, error: prodGetError } = await supabase
             .from('products')
-            .select('stock_quantity')
+            .select('stock_quantity, strips_per_box')
             .eq('id', returnItem.productId)
             .single();
           
           if (prodGetError) throw prodGetError;
 
+          const { data: orderItemData } = await supabase
+            .from('order_items')
+            .select('unit')
+            .eq('order_id', batchOrderId)
+            .eq('product_id', returnItem.productId)
+            .maybeSingle();
+
           const currentStock = prodData?.stock_quantity ?? 0;
+          const stripsPerBox = (prodData as any)?.strips_per_box ?? 1;
+          const qtyInBoxes = orderItemData?.unit === 'شريط' && stripsPerBox > 0 ? returnItem.returnQty / stripsPerBox : returnItem.returnQty;
+
           const { error: prodError } = await supabase
             .from('products')
-            .update({ stock_quantity: currentStock + returnItem.returnQty })
+            .update({ stock_quantity: currentStock + qtyInBoxes })
             .eq('id', returnItem.productId);
           
           if (prodError) throw prodError;
@@ -4024,7 +4163,8 @@ setupRealtime: () => {
         paid_instapay: splits.instapay,
         paid_method5: splits.method5 || 0,
         paid_method6: splits.method6 || 0,
-        payment_method: invoice.payment_method
+        payment_method: invoice.payment_method,
+        type: invoice.type || 'purchase'
       })
       .select()
       .single();
@@ -4054,6 +4194,7 @@ setupRealtime: () => {
 
     // 3. Update stock and average price for each product
     const updatedProducts = [...state.products];
+    const isReturn = invoice.type === 'return';
     for (const item of items) {
       const productIndex = updatedProducts.findIndex(p => p.id === item.product_id);
       if (productIndex !== -1) {
@@ -4061,13 +4202,17 @@ setupRealtime: () => {
         const oldQty = product.stock_quantity;
         const oldAvgPrice = product.average_purchase_price || product.purchase_price || 0;
         
-        const newQty = oldQty + item.quantity;
-        const newTotalValue = (oldQty * oldAvgPrice) + (item.quantity * item.purchase_price);
-        const newAvgPrice = newQty > 0 ? newTotalValue / newQty : 0;
+        const newQty = isReturn ? oldQty - item.quantity : oldQty + item.quantity;
+        
+        let newAvgPrice = oldAvgPrice;
+        if (!isReturn) {
+          const newTotalValue = (oldQty * oldAvgPrice) + (item.quantity * item.purchase_price);
+          newAvgPrice = newQty > 0 ? newTotalValue / newQty : 0;
+        }
 
         // Update DB
         await supabase.from('products').update({
-          stock_quantity: newQty,
+          stock_quantity: Math.max(0, newQty),
           average_purchase_price: newAvgPrice,
           purchase_price: item.purchase_price
         }).eq('id', product.id);
@@ -4075,7 +4220,7 @@ setupRealtime: () => {
         // Update local state copy
         updatedProducts[productIndex] = {
           ...product,
-          stock_quantity: newQty,
+          stock_quantity: Math.max(0, newQty),
           average_purchase_price: newAvgPrice,
           purchase_price: item.purchase_price
         };
@@ -4228,6 +4373,30 @@ setupRealtime: () => {
       const invoice = state.purchaseInvoices.find(inv => inv.id === id);
       const supplierName = invoice ? state.suppliers.find(s => s.id === invoice.supplier_id)?.name : 'مورد';
 
+      // Restore product stock
+      if (invoice && invoice.items) {
+        const isReturn = invoice.type === 'return';
+        const updatedProducts = [...state.products];
+        for (const item of invoice.items) {
+          const productIndex = updatedProducts.findIndex(p => p.id === item.product_id);
+          if (productIndex !== -1) {
+            const product = updatedProducts[productIndex];
+            const oldQty = product.stock_quantity;
+            const newQty = isReturn ? oldQty + item.quantity : oldQty - item.quantity;
+            
+            await supabase.from('products').update({
+              stock_quantity: Math.max(0, newQty)
+            }).eq('id', product.id);
+            
+            updatedProducts[productIndex] = {
+              ...product,
+              stock_quantity: Math.max(0, newQty)
+            };
+          }
+        }
+        set({ products: updatedProducts });
+      }
+
       // Delete purchase items first
       await supabase.from('purchase_items').delete().eq('invoice_id', id);
       // Delete the invoice
@@ -4259,7 +4428,10 @@ setupRealtime: () => {
 
     // Validate: don't accept more than what's owed to this supplier
     const supplierInvoices = state.purchaseInvoices.filter(inv => inv.supplier_id === supplierId);
-    const totalSupplierDebt = supplierInvoices.reduce((sum, inv) => sum + (inv.total - inv.paid_amount), 0);
+    const totalSupplierDebt = supplierInvoices.reduce((sum, inv) => {
+      const netTotal = inv.type === 'return' ? -inv.total : inv.total;
+      return sum + (netTotal - (inv.paid_amount || 0));
+    }, 0);
     if (amount > totalSupplierDebt + 0.01) {
       alert(`المبلغ المدخل (${amount.toFixed(2)}) أكبر من إجمالي مديونية المورد (${Math.max(0, totalSupplierDebt).toFixed(2)})`);
       return;

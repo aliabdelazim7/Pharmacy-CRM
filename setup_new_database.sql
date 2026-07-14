@@ -97,6 +97,12 @@ create table if not exists products (
   unit text not null default 'قطعة',
   category_id uuid references categories(id) on delete set null,
   is_hidden boolean default false,
+  has_strips boolean default false,
+  strips_per_box integer default 1,
+  strip_sale_price numeric default 0,
+  production_date date,
+  expiry_date date,
+  type text default 'product',
   created_at timestamptz default now()
 );
 

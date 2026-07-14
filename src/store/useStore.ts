@@ -1,4 +1,5 @@
 // Auto‑push test comment
+import { create } from 'zustand';
 import { supabase } from '../lib/supabase';
 import { unitMinQty, unitStep } from '../utils/units';
 
@@ -827,6 +828,7 @@ export const useStore = create<CashierStore>((set, get) => ({
   isSyncing: false,
   activeCashier: null,
   isAdminAuthenticated: !!sessionStorage.getItem('cashier_admin_auth'),
+  currentAdmin: null,
   adminPermissions: (() => { try { const v = sessionStorage.getItem('admin_permissions'); return v ? JSON.parse(v) : null; } catch { return null; } })(),
   adminUsers: [],
   isPOSAuthenticated: !!sessionStorage.getItem('cashier_pos_auth'),

@@ -212,7 +212,8 @@ create table if not exists order_items (
   returned_quantity numeric default 0,
   refunded_amount numeric default 0,
   sale_price numeric default 0,
-  purchase_price numeric default 0
+  purchase_price numeric default 0,
+  unit text default 'قطعة'
 );
 
 create table if not exists expenses (

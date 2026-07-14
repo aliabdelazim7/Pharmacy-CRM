@@ -533,7 +533,7 @@ export default function Inventory() {
                 </div>
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">سعر البيع لكل {getUnitConfig(formData.unit).label} <span className="text-red-500">*</span></label>
-                  <input type="number" min="0" step="0.01" required value={formData.sale_price} onChange={e => setFormData({...formData, sale_price: parseFloat(e.target.value) || 0})} style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-green-500" />
+                  <input type="number" min="0" step="0.01" required value={formData.sale_price} onChange={e => { const v = parseFloat(e.target.value) || 0; setFormData({ ...formData, sale_price: v, strip_sale_price: formData.has_strips && formData.strips_per_box > 0 ? Number((v / formData.strips_per_box).toFixed(2)) : formData.strip_sale_price }); }} style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any} className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-green-500" />
                 </div>
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-1">سعر البيع بعد الخصم (اختياري)</label>

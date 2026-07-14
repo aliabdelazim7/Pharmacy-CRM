@@ -435,6 +435,7 @@ interface CashierStore {
   isLoading: boolean;
   dbError: string | null;
   activeCashier: Cashier | null;
+  currentAdmin?: AdminUser | null;
   employees: Employee[];
   employeeTransactions: EmployeeTransaction[];
   employeeLeaves: EmployeeLeave[];

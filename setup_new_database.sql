@@ -671,9 +671,8 @@ create table if not exists managers (
 alter table managers enable row level security;
 drop policy if exists "allow all" on managers;
 drop policy if exists "authenticated full access" on managers;
-create policy "authenticated full access" on managers for all to authenticated using (true) with check (true);
-revoke all on managers from anon;
-grant all on managers to authenticated;
+create policy "allow all" on managers for all using (true) with check (true);
+grant all on managers to anon, authenticated;
 
 
 -- ========================= 11_fix_public_invoice_uuid.sql =========================
@@ -854,10 +853,10 @@ declare t text;
 begin
   foreach t in array array['partners','partner_transactions'] loop
     execute format('alter table public.%I enable row level security;', t);
+    execute format('drop policy if exists "allow all" on public.%I;', t);
     execute format('drop policy if exists "authenticated full access" on public.%I;', t);
-    execute format('create policy "authenticated full access" on public.%I for all to authenticated using (true) with check (true);', t);
-    execute format('revoke all on public.%I from anon;', t);
-    execute format('grant all on public.%I to authenticated;', t);
+    execute format('create policy "allow all" on public.%I for all using (true) with check (true);', t);
+    execute format('grant all on public.%I to anon, authenticated;', t);
   end loop;
 end $$;
 
@@ -874,10 +873,10 @@ create table if not exists savings_transactions (
   created_at timestamptz default now()
 );
 alter table savings_transactions enable row level security;
+drop policy if exists "allow all" on savings_transactions;
 drop policy if exists "authenticated full access" on savings_transactions;
-create policy "authenticated full access" on savings_transactions for all to authenticated using (true) with check (true);
-revoke all on savings_transactions from anon;
-grant all on savings_transactions to authenticated;
+create policy "allow all" on savings_transactions for all using (true) with check (true);
+grant all on savings_transactions to anon, authenticated;
 
 
 -- ========================= 17_exchange.sql =========================
@@ -899,10 +898,10 @@ create table if not exists stock_adjustments (
   created_at timestamptz default now()
 );
 alter table stock_adjustments enable row level security;
+drop policy if exists "allow all" on stock_adjustments;
 drop policy if exists "authenticated full access" on stock_adjustments;
-create policy "authenticated full access" on stock_adjustments for all to authenticated using (true) with check (true);
-revoke all on stock_adjustments from anon;
-grant all on stock_adjustments to authenticated;
+create policy "allow all" on stock_adjustments for all using (true) with check (true);
+grant all on stock_adjustments to anon, authenticated;
 
 
 -- ========================= 19_settings_extras.sql =========================
@@ -922,10 +921,10 @@ create table if not exists admin_users (
   created_at timestamptz default now()
 );
 alter table admin_users enable row level security;
+drop policy if exists "allow all" on admin_users;
 drop policy if exists "authenticated full access" on admin_users;
-create policy "authenticated full access" on admin_users for all to authenticated using (true) with check (true);
-revoke all on admin_users from anon;
-grant all on admin_users to authenticated;
+create policy "allow all" on admin_users for all using (true) with check (true);
+grant all on admin_users to anon, authenticated;
 
 -- قائمة الدخول (بدون كلمة السر) — يستخدمها anon في شاشة الدخول لاختيار المستخدم.
 create or replace function public.get_admin_login_data()
@@ -1025,7 +1024,5 @@ create index if not exists idx_held_invoices_created_at on public.held_invoices(
 alter table public.held_invoices enable row level security;
 drop policy if exists "allow all" on public.held_invoices;
 drop policy if exists "authenticated full access" on public.held_invoices;
-create policy "authenticated full access" on public.held_invoices
-  for all to authenticated using (true) with check (true);
-revoke all on public.held_invoices from anon;
-grant all on public.held_invoices to authenticated;
+create policy "allow all" on public.held_invoices for all using (true) with check (true);
+grant all on public.held_invoices to anon, authenticated;

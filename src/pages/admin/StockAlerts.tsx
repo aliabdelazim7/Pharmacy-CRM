@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useStore } from '../../store/useStore';
-import { AlertTriangle, PackageX, PackageMinus, Lightbulb, MessageSquare, Check, Trash2, Plus, Eye, EyeOff } from 'lucide-react';
+import { AlertTriangle, PackageX, PackageMinus, Lightbulb, MessageSquare, Check, Trash2, Plus, Eye, EyeOff, CalendarClock } from 'lucide-react';
+import { expiryStatus, daysUntilExpiry } from '../../utils/expiry';
 
 export default function StockAlerts() {
   const { 
@@ -14,6 +16,7 @@ export default function StockAlerts() {
     markCashierNoteAsRead
   } = useStore();
 
+  const navigate = useNavigate();
   const [newSuggestionName, setNewSuggestionName] = useState('');
   const [newSuggestionNotes, setNewSuggestionNotes] = useState('');
   const [isAddingSuggestion, setIsAddingSuggestion] = useState(false);
@@ -24,6 +27,12 @@ export default function StockAlerts() {
   // Derived Data
   const outOfStockProducts = products.filter(p => p.stock_quantity <= 0);
   const lowStockProducts = products.filter(p => p.stock_quantity > 0 && p.stock_quantity <= LOW_STOCK_THRESHOLD);
+
+  // أدوية منتهية / قربت تنتهي (حسب فترة التذكير الخاصة بكل منتج) — الأقرب أولاً.
+  const expiringProducts = products
+    .map(p => ({ p, status: expiryStatus(p.expiry_date, p.expiry_reminder_days), days: daysUntilExpiry(p.expiry_date) }))
+    .filter(x => x.status === 'expired' || x.status === 'soon')
+    .sort((a, b) => (a.days ?? 0) - (b.days ?? 0));
   const unpurchasedSuggestions = productSuggestions.filter(s => !s.is_purchased);
   const unreadNotes = cashierNotes.filter(n => !n.is_read);
 
@@ -131,6 +140,51 @@ export default function StockAlerts() {
               <div className="h-full flex flex-col items-center justify-center text-slate-400 p-8 text-center">
                 <Check size={48} className="text-emerald-400 mb-4 opacity-50" />
                 <p className="font-bold">المخزون بوضع جيد ولا توجد نواقص</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Near-Expiry / Expired Section */}
+        <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-sm border border-rose-100 dark:border-rose-900/30 overflow-hidden flex flex-col lg:col-span-2">
+          <div className="p-6 bg-rose-50 dark:bg-rose-900/10 border-b border-rose-100 dark:border-rose-900/30 flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-900/50 flex items-center justify-center text-rose-600 dark:text-rose-400">
+              <CalendarClock size={20} />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-rose-700 dark:text-rose-400">أدوية منتهية / قربت تنتهي</h2>
+              <p className="text-sm text-rose-600/70 mt-1">أحمر = منتهي · برتقالي = قرب الانتهاء (حسب تذكير كل دواء) — مرتّبة بالأقرب انتهاءً</p>
+            </div>
+          </div>
+          <div className="p-6 max-h-[420px] overflow-y-auto">
+            {expiringProducts.length > 0 ? (
+              <ul className="space-y-3">
+                {expiringProducts.map(({ p, status, days }) => {
+                  const expired = status === 'expired';
+                  return (
+                    <li
+                      key={p.id}
+                      onClick={() => navigate('/admin/inventory')}
+                      title="فتح المخزون"
+                      className={`flex justify-between items-center p-4 rounded-2xl border cursor-pointer transition hover:shadow-sm ${expired ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-900/40' : 'bg-orange-50 dark:bg-orange-900/10 border-orange-200 dark:border-orange-900/40'}`}
+                    >
+                      <div className="flex-1">
+                        <p className="font-bold text-slate-800 dark:text-white">{p.name}</p>
+                        <p className="text-xs text-slate-500 mt-1">
+                          تاريخ الانتهاء: <b>{p.expiry_date}</b> · الكمية: <b>{p.stock_quantity}</b>
+                        </p>
+                      </div>
+                      <span className={`px-3 py-1 rounded-full text-sm font-bold whitespace-nowrap ${expired ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'}`}>
+                        {expired ? `منتهي منذ ${Math.abs(days ?? 0)} يوم` : `باقٍ ${days} يوم`}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center text-slate-400 p-8 text-center">
+                <Check size={48} className="text-emerald-400 mb-4 opacity-50" />
+                <p className="font-bold">لا توجد أدوية منتهية أو قاربت على الانتهاء</p>
               </div>
             )}
           </div>

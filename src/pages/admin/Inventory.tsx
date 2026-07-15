@@ -3,6 +3,7 @@ import { useStore, type Product } from '../../store/useStore';
 import { Plus, Edit2, EyeOff, Eye, Search, X, Tag, FileText, Table as TableIcon, Box, AlertTriangle, TrendingUp, ScanLine, CheckCircle2, Printer } from 'lucide-react';
 import { normalizeArabic } from '../../utils/textUtils';
 import { UNIT_OPTIONS, getUnitConfig, isFractionalUnit, formatQty } from '../../utils/units';
+import { validateMedicineExpiry } from '../../utils/expiry';
 import { generateBarcode, printBarcodeLabels } from '../../utils/printBarcodeLabels';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
@@ -79,7 +80,8 @@ export default function Inventory() {
     strips_per_box: 1,
     strip_sale_price: 0,
     production_date: '',
-    expiry_date: ''
+    expiry_date: '',
+    expiry_reminder_days: 30
   });
 
   // الكمية حسب المخزن المختار: الكل = الإجمالي، المعرض = المعروض، المستودع = الباقي.
@@ -193,7 +195,8 @@ export default function Inventory() {
       strips_per_box: product.strips_per_box || 1,
       strip_sale_price: product.strip_sale_price || 0,
       production_date: product.production_date || '',
-      expiry_date: product.expiry_date || ''
+      expiry_date: product.expiry_date || '',
+      expiry_reminder_days: product.expiry_reminder_days ?? 30
     });
     setShowAddModal(true);
   };
@@ -218,7 +221,8 @@ export default function Inventory() {
       strips_per_box: 1,
       strip_sale_price: 0,
       production_date: '',
-      expiry_date: ''
+      expiry_date: '',
+      expiry_reminder_days: 30
     });
     setWarehouseQty(0);
     setShowAddModal(true);
@@ -245,11 +249,19 @@ export default function Inventory() {
     }
 
     const serviceMode = formData.type === 'service';
+
+    // صلاحية إلزامية لكل دواء (ماعدا الخدمات): تاريخ + سنة قادمة على الأقل.
+    if (!serviceMode) {
+      const expErr = validateMedicineExpiry(formData.expiry_date);
+      if (expErr) { alert(expErr); return; }
+    }
+
     let payload = {
       ...formData,
       barcode,
       production_date: formData.production_date ? formData.production_date : null,
       expiry_date: formData.expiry_date ? formData.expiry_date : null,
+      expiry_reminder_days: Number(formData.expiry_reminder_days) || 30,
     };
 
     // خدمة: بلا سعر شراء وبلا كمية — نعطيها مخزوناً كبيراً حتى لا تنفد أبداً.
@@ -312,7 +324,8 @@ export default function Inventory() {
         strips_per_box: 1,
         strip_sale_price: 0,
         production_date: '',
-        expiry_date: ''
+        expiry_date: '',
+        expiry_reminder_days: 30
       });
       setWarehouseQty(0);
     } catch (err: any) {
@@ -618,13 +631,28 @@ export default function Inventory() {
                       />
                     </div>
                     <div>
-                      <label className="block text-sm font-bold text-slate-700 mb-1">تاريخ انتهاء الصلاحية (تاريخ النهاية)</label>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">تاريخ انتهاء الصلاحية <span className="text-red-500">*</span></label>
                       <input
                         type="date"
+                        required={formData.type !== 'service'}
                         value={formData.expiry_date}
                         onChange={e => setFormData({ ...formData, expiry_date: e.target.value })}
-                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none"
+                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none border-l-4 border-l-red-400"
                       />
+                      <p className="text-xs text-slate-400 mt-1">إلزامي — ويجب أن تكون السنة {new Date().getFullYear() + 1} على الأقل.</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-1">تذكير قبل انتهاء الصلاحية (أيام)</label>
+                      <select
+                        value={formData.expiry_reminder_days}
+                        onChange={e => setFormData({ ...formData, expiry_reminder_days: Number(e.target.value) })}
+                        className="w-full bg-slate-50 border border-slate-200 py-3 px-4 rounded-xl focus:ring-2 focus:outline-none"
+                      >
+                        {[7, 15, 30, 60, 90].map(d => (
+                          <option key={d} value={d}>{d} يوم</option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-slate-400 mt-1">ينبّهك في مركز الإشعارات قبل الانتهاء بهذه المدة.</p>
                     </div>
                     <div className="sm:col-span-2 flex items-center gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
                       <input

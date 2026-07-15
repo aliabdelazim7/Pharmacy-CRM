@@ -102,6 +102,9 @@ create table if not exists products (
   strip_sale_price numeric default 0,
   production_date date,
   expiry_date date,
+  expiry_reminder_days integer default 30,
+  is_deleted boolean not null default false,
+  deleted_at timestamptz,
   type text default 'product',
   created_at timestamptz default now()
 );

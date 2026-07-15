@@ -2,6 +2,7 @@
 import { create } from 'zustand';
 import { supabase } from '../lib/supabase';
 import { unitMinQty, unitStep } from '../utils/units';
+import { validateMedicineExpiry } from '../utils/expiry';
 
 // Effective unit price for the current invoice type (retail / half-wholesale / wholesale).
 function priceForType(product: any, type: string): number {
@@ -79,6 +80,9 @@ export interface Product {
   strip_sale_price?: number; // سعر الشريط
   production_date?: string | null; // تاريخ الإنتاج (Start Date)
   expiry_date?: string | null; // تاريخ انتهاء الصلاحية (End Date)
+  expiry_reminder_days?: number | null; // أيام التذكير قبل انتهاء الصلاحية (افتراضي 30)
+  is_deleted?: boolean; // حذف آمن — يختفي من كل الشاشات وتبقى الفواتير القديمة
+  deleted_at?: string | null;
 }
 
 // ── التصنيع ──────────────────────────────────────────────────
@@ -994,7 +998,7 @@ export const useStore = create<CashierStore>((set, get) => ({
         await Promise.all([
           supabase.from('store_settings').select('*').limit(1).maybeSingle(),
           supabase.from('categories').select('*').order('name'),
-          supabase.from('products').select('*').order('name'),
+          supabase.from('products').select('*').eq('is_deleted', false).order('name'),
           supabase.from('customers').select('*').order('created_at', { ascending: false }),
           supabase
             .from('orders')
@@ -1182,7 +1186,7 @@ export const useStore = create<CashierStore>((set, get) => ({
 
   loadProductsOnly: async () => {
     try {
-      const { data, error } = await supabase.from('products').select('*').order('name');
+      const { data, error } = await supabase.from('products').select('*').eq('is_deleted', false).order('name');
       if (!error && data) {
         set({
           products: data.map((p: any) => ({
@@ -3678,6 +3682,11 @@ setupRealtime: () => {
     };
   },
   addProduct: async (product) => {
+    // صلاحية إلزامية لكل دواء (إلا الخدمات): لازم تاريخ + سنة قادمة على الأقل.
+    if ((product as any).type !== 'service') {
+      const expErr = validateMedicineExpiry((product as any).expiry_date);
+      if (expErr) throw new Error(expErr);
+    }
     const { data, error } = await supabase.from('products').insert(product).select().single();
     if (error) {
       console.error("Error adding product:", error);
@@ -3701,8 +3710,10 @@ setupRealtime: () => {
   },
 
   deleteProduct: async (id) => {
-    // Realtime subscription handles the live DELETE — no need to broadcast
-    await supabase.from('products').delete().eq('id', id);
+    // حذف آمن (soft delete): المنتج يختفي من كل الشاشات الجديدة، لكن فواتيره
+    // القديمة تبقى كما هي (order_items تخزّن الاسم والسعر) ولا تنكسر الـ FK.
+    set((state) => ({ products: state.products.filter((p) => p.id !== id) }));
+    await supabase.from('products').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', id);
   },
 
   // تسوية الجرد: تحديث مخزون المنتجات للكمية المجرودة وتسجيل الفروق.
@@ -4199,6 +4210,15 @@ setupRealtime: () => {
 
   addPurchaseInvoice: async (invoice, items, splitPayments) => {
     const state = get();
+    // لا يمكن شراء دواء بدون تاريخ صلاحية (إلا المرتجعات للمورد والخدمات).
+    if (invoice.type !== 'return') {
+      for (const it of items) {
+        const prod = state.products.find((p) => p.id === it.product_id);
+        if (prod && prod.type !== 'service' && !prod.expiry_date) {
+          throw new Error(`المنتج "${prod.name}" بدون تاريخ صلاحية. عدّل المنتج وأضف تاريخ الصلاحية أولاً قبل الشراء.`);
+        }
+      }
+    }
     const splits = getSplits(splitPayments, invoice.payment_method, invoice.paid_amount);
     // 1. Insert Invoice
     const { data: invData, error: invError } = await supabase

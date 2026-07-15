@@ -3554,7 +3554,7 @@ setupRealtime: () => {
               sale_price: i.sale_price,
               stock_quantity: i.products?.stock_quantity || 0,
               category_id: i.products?.category_id || '',
-              unit: i.products?.unit || 'قطعة',
+              unit: i.unit ?? i.products?.unit ?? 'قطعة',
               quantity: i.quantity,
               returned_quantity: i.returned_quantity || 0,
               refunded_amount: i.refunded_amount || 0
@@ -3608,19 +3608,26 @@ setupRealtime: () => {
             let updatedProducts = [...state.products];
             if (eventType === 'INSERT') {
               const p = newRecord as any;
+              if (p.is_deleted) return { products: updatedProducts }; // محذوف آمن — لا تُضِفه
               updatedProducts = [{
                 ...p,
                 unit: p.unit ?? 'قطعة',
                 average_purchase_price: p.average_purchase_price ?? p.purchase_price ?? 0
               } as Product, ...updatedProducts];
             } else if (eventType === 'UPDATE') {
-              updatedProducts = updatedProducts.map((p) =>
-                p.id === (newRecord as any).id ? {
-                  ...(newRecord as any),
-                  unit: (newRecord as any).unit ?? 'قطعة',
-                  average_purchase_price: (newRecord as any).average_purchase_price ?? (newRecord as any).purchase_price ?? 0
-                } as Product : p
-              );
+              const rec = newRecord as any;
+              if (rec.is_deleted) {
+                // حذف آمن (soft delete) وصل عبر Realtime → أزله من كل الشاشات.
+                updatedProducts = updatedProducts.filter((p) => p.id !== rec.id);
+              } else {
+                updatedProducts = updatedProducts.map((p) =>
+                  p.id === rec.id ? {
+                    ...rec,
+                    unit: rec.unit ?? 'قطعة',
+                    average_purchase_price: rec.average_purchase_price ?? rec.purchase_price ?? 0
+                  } as Product : p
+                );
+              }
             } else if (eventType === 'DELETE') {
               updatedProducts = updatedProducts.filter((p) => p.id !== (oldRecord as any).id);
             }

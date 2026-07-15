@@ -3,7 +3,7 @@ import { useStore, type Product } from '../../store/useStore';
 import { Plus, Edit2, EyeOff, Eye, Search, X, Tag, FileText, Table as TableIcon, Box, AlertTriangle, TrendingUp, ScanLine, CheckCircle2, Printer } from 'lucide-react';
 import { normalizeArabic } from '../../utils/textUtils';
 import { UNIT_OPTIONS, getUnitConfig, isFractionalUnit, formatQty } from '../../utils/units';
-import { validateMedicineExpiry } from '../../utils/expiry';
+import { validateMedicineExpiry, expiryStatus, daysUntilExpiry } from '../../utils/expiry';
 import { generateBarcode, printBarcodeLabels } from '../../utils/printBarcodeLabels';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
@@ -16,8 +16,14 @@ const SERVICE_STOCK = 1_000_000;
 const isService = (p: any) => p?.type === 'service';
 
 export default function Inventory() {
-  const { products, categories, storeSettings, addProduct, updateProduct, orders } = useStore();
+  const { products, categories, storeSettings, addProduct, updateProduct, orders, suppliers, purchaseInvoices } = useStore();
   const [searchQuery, setSearchQuery] = useState('');
+  // فلاتر الصلاحية والمورد والترتيب (تُدمج مع البحث والتصنيف الموجودين).
+  const [expiryFilter, setExpiryFilter] = useState<'all' | 'expired' | 'today' | '7' | '15' | '30' | '60' | '90' | 'custom'>('all');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [expirySort, setExpirySort] = useState<'default' | 'nearest' | 'latest'>('default');
+  const [supplierFilter, setSupplierFilter] = useState('all');
   const [stockLocation, setStockLocation] = useState<'all' | 'warehouse' | 'display'>('all');
   const [typeFilter, setTypeFilter] = useState<'all' | 'product' | 'service'>('all');
   const [warehouseQty, setWarehouseQty] = useState(0); // كمية المستودع عند إضافة منتج جديد
@@ -103,6 +109,44 @@ export default function Inventory() {
   const normalizedSearch = normalizeArabic(searchQuery);
   const searchTerms = normalizedSearch.split(' ').filter(t => t.trim() !== '');
 
+  // مورّدو كل منتج مشتقّون من فواتير الشراء (منتج قد يُشترى من أكثر من مورد).
+  const supplierNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    suppliers.forEach(s => m.set(s.id, s.name));
+    return m;
+  }, [suppliers]);
+  const productSuppliers = useMemo(() => {
+    const map = new Map<string, Set<string>>(); // productId → set(supplierId)
+    (purchaseInvoices || []).forEach(inv => {
+      if (inv.type === 'return' || !inv.supplier_id) return;
+      (inv.items || []).forEach(it => {
+        if (!it.product_id) return;
+        if (!map.has(it.product_id)) map.set(it.product_id, new Set());
+        map.get(it.product_id)!.add(inv.supplier_id);
+      });
+    });
+    return map;
+  }, [purchaseInvoices]);
+  const supplierNamesOf = (id: string) =>
+    Array.from(productSuppliers.get(id) || []).map(sid => supplierNameById.get(sid) || '').filter(Boolean);
+
+  // مطابقة فلتر الصلاحية على منتج واحد.
+  const matchesExpiry = (p: any): boolean => {
+    if (expiryFilter === 'all') return true;
+    const d = daysUntilExpiry(p.expiry_date);
+    if (expiryFilter === 'custom') {
+      if (!p.expiry_date) return false;
+      const t = new Date(p.expiry_date).getTime();
+      const okFrom = !customFrom || t >= new Date(customFrom).getTime();
+      const okTo = !customTo || t <= new Date(customTo).getTime();
+      return okFrom && okTo;
+    }
+    if (d === null) return false; // بلا تاريخ → خارج كل فلاتر الصلاحية
+    if (expiryFilter === 'expired') return d < 0;
+    if (expiryFilter === 'today') return d === 0;
+    return d >= 0 && d <= Number(expiryFilter); // 7/15/30/60/90 يوم (غير المنتهية)
+  };
+
   const filteredProducts = products.filter(p => {
     const normalizedName = normalizeArabic(p.name);
     const matchesSearch = searchTerms.length === 0 || searchTerms.every(term => normalizedName.includes(term)) || (p.barcode && p.barcode.includes(searchQuery));
@@ -111,8 +155,19 @@ export default function Inventory() {
     const matchesCategory = selectedCategory === 'all' || p.category_id === selectedCategory;
     const pType = isService(p) ? 'service' : 'product';
     const matchesType = typeFilter === 'all' || pType === typeFilter;
-    return matchesSearch && matchesStock && matchesHidden && matchesCategory && matchesType;
-  }).sort((a, b) => new Date((b as any).created_at || 0).getTime() - new Date((a as any).created_at || 0).getTime());
+    const matchesSupplier = supplierFilter === 'all' || (productSuppliers.get(p.id)?.has(supplierFilter) ?? false);
+    return matchesSearch && matchesStock && matchesHidden && matchesCategory && matchesType && matchesSupplier && matchesExpiry(p);
+  }).sort((a, b) => {
+    if (expirySort !== 'default') {
+      const da = daysUntilExpiry((a as any).expiry_date);
+      const db = daysUntilExpiry((b as any).expiry_date);
+      if (da === null && db === null) return 0;
+      if (da === null) return 1;  // بلا تاريخ → آخر القائمة
+      if (db === null) return -1;
+      return expirySort === 'nearest' ? da - db : db - da;
+    }
+    return new Date((b as any).created_at || 0).getTime() - new Date((a as any).created_at || 0).getTime();
+  });
   const hiddenCount = products.filter(p => p.is_hidden).length;
 
   // الإحصائيات حسب الفلاتر المختارة (النوع + التصنيف + المخزن).
@@ -833,6 +888,60 @@ export default function Inventory() {
                 ))}
               </select>
             </div>
+
+            {/* فلتر حالة الصلاحية */}
+            <select
+              value={expiryFilter}
+              onChange={(e) => setExpiryFilter(e.target.value as any)}
+              style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
+              className="bg-white border border-slate-200 rounded-xl py-2.5 px-4 text-sm font-bold text-slate-600 focus:outline-none focus:ring-2 shadow-sm cursor-pointer"
+              title="فلتر حسب الصلاحية"
+            >
+              <option value="all">كل الصلاحيات</option>
+              <option value="expired">🔴 منتهية</option>
+              <option value="today">تنتهي اليوم</option>
+              <option value="7">خلال 7 أيام</option>
+              <option value="15">خلال 15 يوم</option>
+              <option value="30">خلال 30 يوم</option>
+              <option value="60">خلال 60 يوم</option>
+              <option value="90">خلال 90 يوم</option>
+              <option value="custom">نطاق مخصص…</option>
+            </select>
+            {expiryFilter === 'custom' && (
+              <div className="flex items-center gap-1">
+                <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} title="من" className="bg-white border border-slate-200 rounded-xl py-2 px-2 text-xs shadow-sm" />
+                <span className="text-slate-400 text-xs">→</span>
+                <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} title="إلى" className="bg-white border border-slate-200 rounded-xl py-2 px-2 text-xs shadow-sm" />
+              </div>
+            )}
+
+            {/* فلتر المورد */}
+            <select
+              value={supplierFilter}
+              onChange={(e) => setSupplierFilter(e.target.value)}
+              style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
+              className="bg-white border border-slate-200 rounded-xl py-2.5 px-4 text-sm font-bold text-slate-600 focus:outline-none focus:ring-2 shadow-sm cursor-pointer"
+              title="فلتر حسب المورد"
+            >
+              <option value="all">كل الموردين</option>
+              {suppliers.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+
+            {/* ترتيب حسب الصلاحية */}
+            <select
+              value={expirySort}
+              onChange={(e) => setExpirySort(e.target.value as any)}
+              style={{ '--tw-ring-color': storeSettings.themeColor + '40' } as any}
+              className="bg-white border border-slate-200 rounded-xl py-2.5 px-4 text-sm font-bold text-slate-600 focus:outline-none focus:ring-2 shadow-sm cursor-pointer"
+              title="الترتيب"
+            >
+              <option value="default">الأحدث إضافة</option>
+              <option value="nearest">الأقرب انتهاءً</option>
+              <option value="latest">الأبعد انتهاءً</option>
+            </select>
+
             {hiddenCount > 0 && (
               <button
                 onClick={() => setShowHidden(!showHidden)}
@@ -860,6 +969,7 @@ export default function Inventory() {
                 <th className="p-4">اسم المنتج</th>
                 <th className="p-4">التصنيف</th>
                 <th className="p-4 text-center">الصلاحية</th>
+                <th className="p-4 text-center">المورد</th>
                 <th className="p-4 text-center">الوحدة</th>
                 <th className="p-4 text-center">سعر الشراء</th>
                 <th className="p-4 text-center">متوسط الشراء</th>
@@ -890,17 +1000,23 @@ export default function Inventory() {
                     </td>
                     <td className="p-4 text-slate-500">{category}</td>
                     <td className="p-4 text-center text-xs">
-                      {product.expiry_date ? (
-                        <span className={`font-bold px-2 py-1 rounded-lg ${
-                          new Date(product.expiry_date).getTime() < new Date().getTime()
-                            ? 'bg-red-100 text-red-700 animate-pulse font-bold'
-                            : 'bg-emerald-100 text-emerald-700 font-bold'
-                        }`}>
-                          {product.expiry_date}
-                        </span>
-                      ) : (
+                      {product.expiry_date ? (() => {
+                        const st = expiryStatus(product.expiry_date, product.expiry_reminder_days);
+                        const d = daysUntilExpiry(product.expiry_date) ?? 0;
+                        const cls = st === 'expired' ? 'bg-red-100 text-red-700' : st === 'soon' ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700';
+                        const label = st === 'expired' ? `🔴 منتهي · منذ ${Math.abs(d)} يوم` : st === 'soon' ? `🟠 باقٍ ${d} يوم` : '🟢 سليم';
+                        return (
+                          <div className="flex flex-col items-center gap-1">
+                            <span className={`font-bold px-2 py-1 rounded-lg ${cls}`}>{product.expiry_date}</span>
+                            <span className={`text-[10px] font-black ${st === 'expired' ? 'text-red-600' : st === 'soon' ? 'text-orange-600' : 'text-emerald-600'}`}>{label}</span>
+                          </div>
+                        );
+                      })() : (
                         <span className="text-slate-400">—</span>
                       )}
+                    </td>
+                    <td className="p-4 text-center text-xs text-slate-500">
+                      {(() => { const names = supplierNamesOf(product.id); return names.length ? names.join('، ') : <span className="text-slate-400">—</span>; })()}
                     </td>
                     <td className="p-4 text-center">
                       <span className="text-xs font-bold bg-slate-100 text-slate-600 px-2 py-1 rounded-lg">{service ? 'خدمة' : getUnitConfig(product.unit).label}</span>

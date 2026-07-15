@@ -14,7 +14,7 @@ update products set expiry_reminder_days = coalesce(expiry_reminder_days, 30)
   where barcode like '62210000%';
 update products set expiry_date = '2028-01-01'
   where barcode like '62210000%' and expiry_date is null;
-update products p set expiry_date = v.d from (values
+update products p set expiry_date = v.d::date from (values
   ('6221000000011','2026-08-05'),   -- بانادول  → قرب الانتهاء
   ('6221000000028','2026-07-25'),   -- بروفين   → قرب الانتهاء
   ('6221000000035','2026-05-10'),   -- كتافلام  → منتهي

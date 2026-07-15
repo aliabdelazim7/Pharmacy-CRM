@@ -8,6 +8,7 @@ import { normalizeArabic } from '../utils/textUtils';
 import { printBarcodeLabels, generateBarcode } from '../utils/printBarcodeLabels';
 import { ALL_PAYMENT_KEYS, activePaymentKeys, payLabelOf } from '../utils/paymentMethods';
 import { getUnitConfig, isFractionalUnit, formatQty } from '../utils/units';
+import { expiryStatus, daysUntilExpiry } from '../utils/expiry';
 import { escapeHtml } from '../utils/escapeHtml';
 import { printDocument } from '../utils/printWindow';
 
@@ -275,8 +276,20 @@ export default function POS() {
   const [weightSubInput, setWeightSubInput] = useState('');   // الكمية بالوحدة الفرعية (جرام...)
   const [pharmacyProduct, setPharmacyProduct] = useState<Product | null>(null);
 
+  // منع بيع الدواء منتهي الصلاحية (نقر / باركود / نافذة المسح). يظهر في البحث لكن لا يُباع.
+  const blockIfExpired = (product: Product): boolean => {
+    if (expiryStatus(product.expiry_date) === 'expired') {
+      const gone = Math.abs(daysUntilExpiry(product.expiry_date) ?? 0);
+      playErrorSound();
+      alert(`❌ هذا الدواء منتهي الصلاحية ولا يمكن بيعه.\n\n${product.name}\nتاريخ الانتهاء: ${product.expiry_date}\nمنتهي منذ ${gone} يوم.`);
+      return true;
+    }
+    return false;
+  };
+
   // فتح نافذة الوزن أو الإضافة المباشرة حسب نوع وحدة المنتج
   const handleAddProduct = (product: Product) => {
+    if (blockIfExpired(product)) return;
     if (product.has_strips) {
       setPharmacyProduct(product);
     } else if (isFractionalUnit(product.unit)) {
@@ -316,6 +329,14 @@ export default function POS() {
 
       const product = products.find(p => p.barcode === code);
       if (product) {
+        // دواء منتهي: يُقرأ بالباركود لكن لا يُضاف — رسالة منع بدل صوت النجاح.
+        if (expiryStatus(product.expiry_date) === 'expired') {
+          blockIfExpired(product);
+          setBarcodeInput('');
+          setScanStatus('error');
+          setTimeout(() => setScanStatus('idle'), 1000);
+          return;
+        }
         playSuccessSound();
         handleAddProduct(product);
         setBarcodeInput('');
@@ -759,7 +780,7 @@ export default function POS() {
         setWeightProduct(scannedProduct as Product);
         setWeightUnitInput('');
         setWeightSubInput('');
-      } else {
+      } else if (!blockIfExpired(scannedProduct as Product)) {
         for (let i = 0; i < scanQty; i++) {
           addToCart(scannedProduct);
         }
@@ -2495,13 +2516,24 @@ export default function POS() {
               const isLowStock = !service && product.stock_quantity > 0 && product.stock_quantity < 5;
               const avgPrice = product.average_purchase_price || product.purchase_price || 0;
               const lastPrice = product.purchase_price || 0;
+              // حالة الصلاحية: منتهي = يظهر لكن لا يُباع · قرب الانتهاء = يُباع مع تحذير.
+              const expSt = service ? 'none' : expiryStatus(product.expiry_date, product.expiry_reminder_days);
+              const expDays = daysUntilExpiry(product.expiry_date);
+              const isExpired = expSt === 'expired';
 
               return (
                 <div
                   key={product.id}
-                  onClick={() => !isOutOfStock && handleAddProduct(product)}
-                  className={`bg-white dark:bg-slate-800 p-4 rounded-3xl shadow-sm hover:shadow-xl cursor-pointer transition-all duration-300 transform hover:-translate-y-1 flex flex-col justify-between border border-gray-100 dark:border-slate-700 ring-1 ring-black/5 dark:ring-white/5 relative overflow-hidden group ${isOutOfStock ? 'opacity-60 cursor-not-allowed grayscale' : ''}`}
+                  onClick={() => !isOutOfStock && !isExpired && handleAddProduct(product)}
+                  className={`bg-white dark:bg-slate-800 p-4 rounded-3xl shadow-sm hover:shadow-xl transition-all duration-300 transform flex flex-col justify-between border border-gray-100 dark:border-slate-700 ring-1 ring-black/5 dark:ring-white/5 relative overflow-hidden group ${isExpired ? 'opacity-60 cursor-not-allowed grayscale ring-2 ring-red-300' : 'cursor-pointer hover:-translate-y-1'} ${isOutOfStock ? 'opacity-60 cursor-not-allowed grayscale' : ''}`}
                 >
+                  {(isExpired || expSt === 'soon') && (
+                    <div className={`absolute top-0 left-0 rounded-br-3xl rounded-tl-xl px-2.5 py-1 text-[10px] font-black text-white shadow-sm z-10 ${isExpired ? 'bg-red-600' : 'bg-orange-500'}`}>
+                      {isExpired
+                        ? `منتهي · ${product.expiry_date} · منذ ${Math.abs(expDays ?? 0)} يوم`
+                        : `ينتهي خلال ${expDays} يوم`}
+                    </div>
+                  )}
                   <div className={`absolute top-0 right-0 rounded-bl-3xl rounded-tr-xl px-3 py-1 text-xs font-bold text-white shadow-sm transition-colors ${service ? 'bg-emerald-500' : isOutOfStock ? 'bg-slate-500' : isLowStock ? 'bg-red-500' : 'bg-green-500 dark:bg-green-600'}`}>
                     {service ? 'خدمة' : isOutOfStock ? 'نفذت' : formatQty(product.stock_quantity, product.unit)}
                   </div>
@@ -2659,7 +2691,14 @@ export default function POS() {
             cart.map((item) => (
               <div key={item.id + '-' + item.unit} className="bg-white dark:bg-slate-800 p-3 rounded-xl shadow-sm border border-gray-100 dark:border-slate-700 flex flex-col gap-2 relative overflow-hidden group hover:shadow-md transition-shadow">
                 <div className="flex justify-between items-start">
-                  <h4 className="font-bold text-gray-800 dark:text-gray-100 leading-tight w-4/5 text-sm">{item.name}</h4>
+                  <h4 className="font-bold text-gray-800 dark:text-gray-100 leading-tight w-4/5 text-sm">
+                    {item.name}
+                    {expiryStatus((item as any).expiry_date, (item as any).expiry_reminder_days) === 'soon' && (
+                      <span title={`ينتهي خلال ${daysUntilExpiry((item as any).expiry_date)} يوم (${(item as any).expiry_date})`} className="inline-flex items-center gap-1 mr-1.5 align-middle bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400 text-[9px] font-black px-1.5 py-0.5 rounded-md">
+                        ⚠ ينتهي خلال {daysUntilExpiry((item as any).expiry_date)} يوم
+                      </span>
+                    )}
+                  </h4>
                   <button onClick={() => removeFromCart(item.id, item.unit)} aria-label="حذف الصنف" className="text-red-500 hover:text-white hover:bg-red-500 dark:text-red-400 transition-colors bg-red-50 dark:bg-red-900/30 p-2 rounded-lg absolute left-3 top-3 border border-red-100 dark:border-red-900/50 shadow-sm">
                     <Trash2 size={16} />
                   </button>

@@ -1133,3 +1133,27 @@ update products p set expiry_date = v.d::date from (values
   ('6221000000035','2026-05-10'),   -- كتافلام  → منتهي
   ('6221000000042','2026-06-01')    -- أبيمول   → منتهي
 ) as v(barcode, d) where p.barcode = v.barcode;
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Server-side guard: block selling expired medicines (BEFORE INSERT trigger)
+-- ═══════════════════════════════════════════════════════════════════════════
+create or replace function public.block_expired_order_item()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_exp date;
+  v_name text;
+begin
+  select expiry_date, name into v_exp, v_name from products where id = new.product_id;
+  if v_exp is not null and v_exp < current_date then
+    raise exception 'لا يمكن بيع دواء منتهي الصلاحية: %', coalesce(v_name, new.product_name);
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_block_expired_order_item on order_items;
+create trigger trg_block_expired_order_item
+  before insert on order_items
+  for each row execute function public.block_expired_order_item();

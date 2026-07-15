@@ -2,7 +2,7 @@
 import { create } from 'zustand';
 import { supabase } from '../lib/supabase';
 import { unitMinQty, unitStep } from '../utils/units';
-import { validateMedicineExpiry } from '../utils/expiry';
+import { validateMedicineExpiry, expiryStatus } from '../utils/expiry';
 
 // Effective unit price for the current invoice type (retail / half-wholesale / wholesale).
 function priceForType(product: any, type: string): number {
@@ -1357,6 +1357,8 @@ export const useStore = create<CashierStore>((set, get) => ({
   addToCart: (product) =>
     set((state) => {
       if (product.stock_quantity <= 0) return state;
+      // حماية خلفية: لا يمكن إضافة دواء منتهي الصلاحية للسلة إطلاقاً.
+      if (expiryStatus((product as any).expiry_date) === 'expired') return state;
       const step = unitStep(product.unit); // 1 للقطعة، 0.25 للوحدات الكسرية
       const existing = state.cart.find((i) => i.id === product.id && i.unit === product.unit);
       
@@ -1387,6 +1389,7 @@ export const useStore = create<CashierStore>((set, get) => ({
   addToCartQty: (product, quantity) =>
     set((state) => {
       if (product.stock_quantity <= 0 || quantity <= 0) return state;
+      if (expiryStatus((product as any).expiry_date) === 'expired') return state;
       const min = unitMinQty(product.unit);
       const existing = state.cart.find((i) => i.id === product.id && i.unit === product.unit);
       
@@ -1451,6 +1454,13 @@ export const useStore = create<CashierStore>((set, get) => ({
     const salespeople = state.salespeople || [];
     const sp = salespeople[0] || null; // للتوافق مع الأعمدة المفردة القديمة (أول كابتن)
     if (state.cart.length === 0 && type !== 'payment' && type !== 'previous_debt') return state.activeInvoiceId;
+
+    // حماية خلفية عند الدفع: امنع إتمام أي فاتورة تحتوي دواءً منتهي الصلاحية.
+    const expiredItem = state.cart.find((i) => expiryStatus((i as any).expiry_date) === 'expired');
+    if (expiredItem) {
+      alert(`❌ لا يمكن إتمام البيع: "${expiredItem.name}" دواء منتهي الصلاحية. يرجى حذفه من الفاتورة.`);
+      return state.activeInvoiceId;
+    }
 
     const savedPaidAmount = type === 'payment' ? paidAmount : Math.min(total, paidAmount);
 
